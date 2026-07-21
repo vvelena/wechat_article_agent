@@ -2,7 +2,6 @@ import asyncio
 import csv
 import json
 import os
-from datetime import datetime, timedelta
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import (
@@ -163,11 +162,6 @@ def is_within_last_days(
 def normalize_wechat_url(url: str) -> str:
     """
     标准化微信公众号文章链接，同时保留访问文章所需参数。
-
-    支持：
-    1. https://mp.weixin.qq.com/s/文章ID
-    2. https://mp.weixin.qq.com/s?__biz=...&mid=...&idx=...&sn=...
-    3. https://mp.weixin.qq.com/s?src=...&timestamp=...&ver=...&signature=...
     """
 
     cleaned = str(url).strip()
@@ -181,7 +175,6 @@ def normalize_wechat_url(url: str) -> str:
     if hostname != "mp.weixin.qq.com":
         return cleaned
 
-    # 形式一：/s/文章ID
     if (
         parsed.path.startswith("/s/")
         and len(parsed.path) > 3
@@ -192,10 +185,8 @@ def normalize_wechat_url(url: str) -> str:
             query="",
             fragment="",
         )
-
         return urlunparse(normalized).rstrip("/")
 
-    # 形式二、三：/s?参数
     if parsed.path == "/s":
         query_items = parse_qsl(
             parsed.query,
@@ -221,17 +212,12 @@ def normalize_wechat_url(url: str) -> str:
             if key in allowed_keys
         ]
 
-        normalized_query = urlencode(
-            filtered_query
-        )
-
         normalized = parsed._replace(
             scheme="https",
             netloc="mp.weixin.qq.com",
-            query=normalized_query,
+            query=urlencode(filtered_query),
             fragment="",
         )
-
         return urlunparse(normalized)
 
     return cleaned
@@ -256,7 +242,6 @@ def is_valid_wechat_url(url: str) -> bool:
     ):
         return False
 
-    # 形式一：/s/文章ID
     if (
         parsed.path.startswith("/s/")
         and len(parsed.path) > 3
@@ -273,7 +258,6 @@ def is_valid_wechat_url(url: str) -> bool:
         )
     )
 
-    # 形式二：标准微信文章参数
     standard_keys = {
         "__biz",
         "mid",
@@ -281,12 +265,6 @@ def is_valid_wechat_url(url: str) -> bool:
         "sn",
     }
 
-    if standard_keys.issubset(
-        query_params.keys()
-    ):
-        return True
-
-    # 形式三：搜狗签名链接
     signed_keys = {
         "src",
         "timestamp",
@@ -294,12 +272,153 @@ def is_valid_wechat_url(url: str) -> bool:
         "signature",
     }
 
-    if signed_keys.issubset(
-        query_params.keys()
-    ):
-        return True
+    return (
+        standard_keys.issubset(
+            query_params.keys()
+        )
+        or signed_keys.issubset(
+            query_params.keys()
+        )
+    )
 
-    return False
+
+def normalize_dedup_text(text: str) -> str:
+    """
+    清洗标题或来源，用于识别相同文章。
+
+    会统一全半角、大小写，并删除空格和标点。
+    """
+
+    normalized = unicodedata.normalize(
+        "NFKC",
+        str(text or ""),
+    ).lower()
+
+    normalized = re.sub(
+        r"[\W_]+",
+        "",
+        normalized,
+        flags=re.UNICODE,
+    )
+
+    return normalized
+
+
+def build_title_account_key(
+    title: str,
+    account: str,
+) -> str:
+    """
+    构建“来源 + 标题”文章去重键。
+    """
+
+    clean_title = normalize_dedup_text(
+        title
+    )
+    clean_account = normalize_dedup_text(
+        account
+    )
+
+    if not clean_title:
+        return ""
+
+    return f"{clean_account}|{clean_title}"
+
+
+def find_existing_duplicate(
+    article_url: str,
+    title: str,
+    account: str,
+) -> dict[str, str] | None:
+    """
+    在已有结果中查找重复文章。
+
+    去重顺序：
+    1. 标准化后的完整链接
+    2. 清洗后的公众号/来源 + 标题
+
+    搜狗签名链接中的 timestamp 和 signature 会变化，
+    所以第二层检查可以识别链接不同但文章相同的情况。
+    """
+
+    if not OUTPUT_FILE.exists():
+        return None
+
+    ensure_output_schema()
+
+    normalized_url = normalize_wechat_url(
+        article_url
+    )
+    current_title_key = (
+        build_title_account_key(
+            title,
+            account,
+        )
+    )
+
+    with OUTPUT_FILE.open(
+        mode="r",
+        newline="",
+        encoding="utf-8-sig",
+    ) as file:
+        reader = csv.DictReader(file)
+
+        for row in reader:
+            existing_url = normalize_wechat_url(
+                row.get("article_url", "")
+            )
+
+            if (
+                normalized_url
+                and existing_url == normalized_url
+            ):
+                return {
+                    "reason": "same_url",
+                    "title": row.get(
+                        "title",
+                        "",
+                    ),
+                    "account": row.get(
+                        "account",
+                        "",
+                    ),
+                    "article_url": row.get(
+                        "article_url",
+                        "",
+                    ),
+                }
+
+            existing_title_key = (
+                build_title_account_key(
+                    row.get("title", ""),
+                    row.get("account", ""),
+                )
+            )
+
+            if (
+                current_title_key
+                and existing_title_key
+                and current_title_key
+                == existing_title_key
+            ):
+                return {
+                    "reason": "same_title_account",
+                    "title": row.get(
+                        "title",
+                        "",
+                    ),
+                    "account": row.get(
+                        "account",
+                        "",
+                    ),
+                    "article_url": row.get(
+                        "article_url",
+                        "",
+                    ),
+                }
+
+    return None
+
 
 
 def validate_score(value: int, field_name: str) -> int:
@@ -431,7 +550,8 @@ def scrape_wechat_article(url: str) -> str:
             {
                 "success": False,
                 "error": (
-                    "链接格式不正确。请输入完整的微信公众号文章链接。"
+                    "链接格式不正确。目前只支持 "
+                    "https://mp.weixin.qq.com/s/... 形式的文章。"
                 ),
             },
             ensure_ascii=False,
@@ -592,7 +712,7 @@ def save_article_analysis(
 ) -> str:
     """
     将量子行业文章分析结果保存到 CSV。
-    如果链接已存在，则不重复保存。
+    如果链接相同，或公众号与标题相同，则不重复保存。
     """
 
     print("\n[工具调用] 正在保存分析结果……")
@@ -604,10 +724,30 @@ def save_article_analysis(
             article_url
         )
 
-        if normalized_url in load_existing_urls():
+        duplicate = find_existing_duplicate(
+            article_url=normalized_url,
+            title=title,
+            account=account,
+        )
+
+        if duplicate is not None:
+            if (
+                duplicate["reason"]
+                == "same_title_account"
+            ):
+                duplicate_reason = (
+                    "公众号/来源与标题相同，"
+                    "虽然搜狗签名链接不同，仍判定为同一篇文章"
+                )
+            else:
+                duplicate_reason = (
+                    "标准化后的文章链接相同"
+                )
+
             message = (
                 "保存状态：duplicate。"
-                "该文章已存在于 CSV，本次未重复写入。"
+                f"{duplicate_reason}；"
+                "此前已保存，本次已跳过。"
             )
 
             print(f"[跳过保存] {message}")
@@ -1149,7 +1289,8 @@ async def main() -> None:
 
         if not is_valid_wechat_url(url):
             print(
-                "链接无效。请输入完整的微信公众号文章链接。"
+                "链接无效。请输入 "
+                "https://mp.weixin.qq.com/s/... 形式的链接。"
             )
             return
 
