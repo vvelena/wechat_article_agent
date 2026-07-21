@@ -2,9 +2,15 @@ import asyncio
 import csv
 import json
 import os
+from datetime import datetime, timedelta
 from dataclasses import dataclass
 from pathlib import Path
-from urllib.parse import urlparse, urlunparse
+from urllib.parse import (
+    parse_qsl,
+    urlencode,
+    urlparse,
+    urlunparse,
+)
 
 import pandas as pd
 from agents import (
@@ -156,10 +162,14 @@ def is_within_last_days(
 
 def normalize_wechat_url(url: str) -> str:
     """
-    标准化微信公众号文章链接，用于去重。
+    标准化微信公众号文章链接，同时保留访问文章所需参数。
 
-    会删除 query 和 fragment，避免同一篇文章因附加参数不同而重复保存。
+    支持：
+    1. https://mp.weixin.qq.com/s/文章ID
+    2. https://mp.weixin.qq.com/s?__biz=...&mid=...&idx=...&sn=...
+    3. https://mp.weixin.qq.com/s?src=...&timestamp=...&ver=...&signature=...
     """
+
     cleaned = str(url).strip()
     parsed = urlparse(cleaned)
 
@@ -171,24 +181,125 @@ def normalize_wechat_url(url: str) -> str:
     if hostname != "mp.weixin.qq.com":
         return cleaned
 
-    normalized = parsed._replace(
-        scheme="https",
-        netloc="mp.weixin.qq.com",
-        query="",
-        fragment="",
-    )
+    # 形式一：/s/文章ID
+    if (
+        parsed.path.startswith("/s/")
+        and len(parsed.path) > 3
+    ):
+        normalized = parsed._replace(
+            scheme="https",
+            netloc="mp.weixin.qq.com",
+            query="",
+            fragment="",
+        )
 
-    return urlunparse(normalized).rstrip("/")
+        return urlunparse(normalized).rstrip("/")
+
+    # 形式二、三：/s?参数
+    if parsed.path == "/s":
+        query_items = parse_qsl(
+            parsed.query,
+            keep_blank_values=False,
+        )
+
+        allowed_keys = {
+            "__biz",
+            "mid",
+            "idx",
+            "sn",
+            "chksm",
+            "src",
+            "timestamp",
+            "ver",
+            "signature",
+            "new",
+        }
+
+        filtered_query = [
+            (key, value)
+            for key, value in query_items
+            if key in allowed_keys
+        ]
+
+        normalized_query = urlencode(
+            filtered_query
+        )
+
+        normalized = parsed._replace(
+            scheme="https",
+            netloc="mp.weixin.qq.com",
+            query=normalized_query,
+            fragment="",
+        )
+
+        return urlunparse(normalized)
+
+    return cleaned
 
 
 def is_valid_wechat_url(url: str) -> bool:
-    parsed = urlparse(str(url).strip())
+    """
+    判断是否为可访问的微信公众号文章链接。
+    """
 
-    return (
-        parsed.scheme in {"http", "https"}
-        and (parsed.hostname or "").lower() == "mp.weixin.qq.com"
-        and parsed.path.startswith("/s")
+    parsed = urlparse(
+        str(url).strip()
     )
+
+    hostname = (
+        parsed.hostname or ""
+    ).lower()
+
+    if (
+        parsed.scheme not in {"http", "https"}
+        or hostname != "mp.weixin.qq.com"
+    ):
+        return False
+
+    # 形式一：/s/文章ID
+    if (
+        parsed.path.startswith("/s/")
+        and len(parsed.path) > 3
+    ):
+        return True
+
+    if parsed.path != "/s":
+        return False
+
+    query_params = dict(
+        parse_qsl(
+            parsed.query,
+            keep_blank_values=False,
+        )
+    )
+
+    # 形式二：标准微信文章参数
+    standard_keys = {
+        "__biz",
+        "mid",
+        "idx",
+        "sn",
+    }
+
+    if standard_keys.issubset(
+        query_params.keys()
+    ):
+        return True
+
+    # 形式三：搜狗签名链接
+    signed_keys = {
+        "src",
+        "timestamp",
+        "ver",
+        "signature",
+    }
+
+    if signed_keys.issubset(
+        query_params.keys()
+    ):
+        return True
+
+    return False
 
 
 def validate_score(value: int, field_name: str) -> int:
@@ -320,8 +431,7 @@ def scrape_wechat_article(url: str) -> str:
             {
                 "success": False,
                 "error": (
-                    "链接格式不正确。目前只支持 "
-                    "https://mp.weixin.qq.com/s/... 形式的文章。"
+                    "链接格式不正确。请输入完整的微信公众号文章链接。"
                 ),
             },
             ensure_ascii=False,
@@ -1039,8 +1149,7 @@ async def main() -> None:
 
         if not is_valid_wechat_url(url):
             print(
-                "链接无效。请输入 "
-                "https://mp.weixin.qq.com/s/... 形式的链接。"
+                "链接无效。请输入完整的微信公众号文章链接。"
             )
             return
 
