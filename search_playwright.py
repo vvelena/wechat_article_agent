@@ -6,7 +6,6 @@ from urllib.parse import (
     parse_qsl,
     quote_plus,
     urlencode,
-    urljoin,
     urlparse,
     urlunparse,
 )
@@ -122,6 +121,7 @@ def normalize_wechat_url(url: str) -> str:
     支持：
     1. https://mp.weixin.qq.com/s/文章ID
     2. https://mp.weixin.qq.com/s?__biz=...&mid=...&idx=...&sn=...
+    3. https://mp.weixin.qq.com/s?src=...&timestamp=...&ver=...&signature=...
     """
 
     cleaned = str(url).strip()
@@ -160,6 +160,11 @@ def normalize_wechat_url(url: str) -> str:
             "idx",
             "sn",
             "chksm",
+            "src",
+            "timestamp",
+            "ver",
+            "signature",
+            "new",
         }
 
         filtered_query = [
@@ -186,7 +191,7 @@ def normalize_wechat_url(url: str) -> str:
 
 def is_wechat_article_url(url: str) -> bool:
     """
-    判断链接是否为有效微信公众号文章链接。
+    判断是否为可访问的微信公众号文章链接。
     """
 
     parsed = urlparse(
@@ -209,26 +214,62 @@ def is_wechat_article_url(url: str) -> bool:
     ):
         return True
 
-    if parsed.path == "/s":
-        query_params = dict(
-            parse_qsl(
-                parsed.query,
-                keep_blank_values=False,
-            )
-        )
+    if parsed.path != "/s":
+        return False
 
-        required_keys = {
-            "__biz",
-            "mid",
-            "idx",
-            "sn",
-        }
-
-        return required_keys.issubset(
-            query_params.keys()
+    query_params = dict(
+        parse_qsl(
+            parsed.query,
+            keep_blank_values=False,
         )
+    )
+
+    standard_keys = {
+        "__biz",
+        "mid",
+        "idx",
+        "sn",
+    }
+
+    if standard_keys.issubset(
+        query_params.keys()
+    ):
+        return True
+
+    signed_keys = {
+        "src",
+        "timestamp",
+        "ver",
+        "signature",
+    }
+
+    if signed_keys.issubset(
+        query_params.keys()
+    ):
+        return True
 
     return False
+
+
+
+def choose_valid_wechat_url(
+    candidate_urls: list[str],
+) -> str:
+    """
+    从多个候选地址中选择一个有效的微信公众号文章链接。
+    """
+
+    for candidate_url in candidate_urls:
+        normalized_url = normalize_wechat_url(
+            candidate_url
+        )
+
+        if is_wechat_article_url(
+            normalized_url
+        ):
+            return normalized_url
+
+    return ""
 
 
 def extract_real_wechat_url(
@@ -618,45 +659,132 @@ def search_sogou_with_playwright(
                 )
 
                 if not href:
+                    print(
+                        "[忽略] 搜索结果没有链接。"
+                    )
                     continue
-
-                redirect_url = urljoin(
-                    "https://weixin.sogou.com",
-                    href,
-                )
 
                 print(
                     f"\n[检查搜索结果] {title}"
                 )
 
-                article_page = context.new_page()
+                article_page = None
+                captured_wechat_urls: list[str] = []
 
-                try:
-                    article_page.goto(
-                        redirect_url,
-                        wait_until="domcontentloaded",
-                        timeout=60_000,
-                    )
-
-                    article_page.wait_for_timeout(
-                        3000
-                    )
+                def capture_request(request) -> None:
+                    request_url = request.url
 
                     if (
                         "mp.weixin.qq.com"
-                        not in article_page.url
+                        in request_url
                     ):
-                        try:
-                            article_page.wait_for_url(
-                                "**mp.weixin.qq.com/**",
-                                timeout=12_000,
-                            )
-                        except Exception:
-                            pass
+                        captured_wechat_urls.append(
+                            request_url
+                        )
 
-                    raw_final_url = article_page.url
-                    final_url = extract_real_wechat_url(
-                        article_page
+                context.on(
+                    "request",
+                    capture_request,
+                )
+
+                try:
+                    # 点击搜狗结果，并同时监听所有网络请求。
+                    # 即使页面最终停在搜狗中转页，
+                    # 只要浏览器请求过微信文章地址，也可以捕获。
+                    pages_before_click = set(
+                        context.pages
+                    )
+
+                    try:
+                        result_link.click(
+                            timeout=10_000
+                        )
+                    except Exception as click_error:
+                        print(
+                            f"[点击失败] {click_error}"
+                        )
+                        continue
+
+                    page.wait_for_timeout(
+                        8000
+                    )
+
+                    pages_after_click = context.pages
+                    new_pages = [
+                        opened_page
+                        for opened_page in pages_after_click
+                        if opened_page
+                        not in pages_before_click
+                    ]
+
+                    if new_pages:
+                        article_page = new_pages[-1]
+                    else:
+                        article_page = page
+
+                    try:
+                        article_page.wait_for_load_state(
+                            "domcontentloaded",
+                            timeout=30_000,
+                        )
+                    except Exception:
+                        pass
+
+                    article_page.wait_for_timeout(
+                        4000
+                    )
+
+                    page_urls = [
+                        opened_page.url
+                        for opened_page in context.pages
+                        if not opened_page.is_closed()
+                    ]
+
+                    print(
+                        "[当前浏览器页面] "
+                        + " | ".join(page_urls)
+                    )
+
+                    if captured_wechat_urls:
+                        print(
+                            "[捕获到微信请求] "
+                            f"{len(captured_wechat_urls)} 条"
+                        )
+                    else:
+                        print(
+                            "[捕获到微信请求] 0 条"
+                        )
+
+                    candidate_urls = (
+                        list(reversed(
+                            captured_wechat_urls
+                        ))
+                        + list(reversed(
+                            page_urls
+                        ))
+                    )
+
+                    final_url = choose_valid_wechat_url(
+                        candidate_urls
+                    )
+
+                    # 网络监听没有抓到时，再从页面 HTML 中寻找。
+                    if (
+                        not final_url
+                        and article_page is not None
+                        and not article_page.is_closed()
+                    ):
+                        final_url = extract_real_wechat_url(
+                            article_page
+                        )
+
+                    raw_final_url = (
+                        article_page.url
+                        if (
+                            article_page is not None
+                            and not article_page.is_closed()
+                        )
+                        else ""
                     )
 
                     print(
@@ -723,7 +851,48 @@ def search_sogou_with_playwright(
                     )
 
                 finally:
-                    article_page.close()
+                    try:
+                        context.remove_listener(
+                            "request",
+                            capture_request,
+                        )
+                    except Exception:
+                        pass
+
+                    # 关闭点击后新开的页面。
+                    for opened_page in list(
+                        context.pages
+                    ):
+                        if (
+                            opened_page != page
+                            and not opened_page.is_closed()
+                        ):
+                            try:
+                                opened_page.close()
+                            except Exception:
+                                pass
+
+                    # 搜狗结果在当前页打开时，返回搜索页。
+                    if (
+                        not page.is_closed()
+                        and "weixin.sogou.com/weixin"
+                        not in page.url
+                    ):
+                        try:
+                            page.goto(
+                                search_url,
+                                wait_until="domcontentloaded",
+                                timeout=60_000,
+                            )
+                            page.wait_for_timeout(
+                                3000
+                            )
+                        except Exception:
+                            pass
+
+                    result_links = page.locator(
+                        "ul.news-list li h3 a"
+                    )
 
                 page.wait_for_timeout(
                     RESULT_INTERVAL_MILLISECONDS
