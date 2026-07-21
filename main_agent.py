@@ -2,6 +2,8 @@ import asyncio
 import csv
 import json
 import os
+import re
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import quote_plus, urlparse
 
@@ -362,28 +364,51 @@ async def analyze_wechat_articles(
                 total_number=len(unique_urls),
             )
 
-            existed_after = article_module.article_already_saved(
-                url
+            result_status = getattr(
+                result,
+                "status",
+                "",
+            )
+            result_message = (
+                getattr(result, "message", None)
+                or str(result)
             )
 
             if existed_before:
                 status = "skipped"
-                skipped += 1
-            elif existed_after:
+            elif result_status in {
+                "saved",
+                "skipped",
+                "failed",
+            }:
+                status = result_status
+            elif (
+                "保存状态：duplicate"
+                in result_message
+                or "此前已保存"
+                in result_message
+            ):
+                status = "skipped"
+            elif (
+                "保存状态：saved"
+                in result_message
+            ):
                 status = "saved"
-                saved += 1
             else:
                 status = "failed"
+
+            if status == "saved":
+                saved += 1
+            elif status == "skipped":
+                skipped += 1
+            else:
                 failed += 1
 
             details.append(
                 {
                     "url": url,
                     "status": status,
-                    "message": (
-                        getattr(result, "message", None)
-                        or str(result)
-                    ),
+                    "message": result_message,
                 }
             )
 
@@ -449,16 +474,262 @@ async def analyze_links_file() -> str:
 
 
 # ============================================================
+# 4. 通用时间提取与过滤
+# ============================================================
+
+def parse_publish_datetime(
+    publish_time_text: str,
+) -> datetime | None:
+    """
+    将常见中文、英文和 ISO 发布时间转换为 datetime。
+    """
+
+    text = str(publish_time_text).strip()
+
+    if (
+        not text
+        or text in {
+            "未获取到发布时间",
+            "未知",
+            "无",
+            "None",
+        }
+    ):
+        return None
+
+    text = text.replace("T", " ")
+    text = re.sub(
+        r"\s+(UTC|GMT)$",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    ).strip()
+
+    # ISO 8601，包括时区形式。
+    iso_candidate = text.replace(
+        "Z",
+        "+00:00",
+    )
+
+    try:
+        parsed = datetime.fromisoformat(
+            iso_candidate
+        )
+
+        if parsed.tzinfo is not None:
+            parsed = parsed.astimezone().replace(
+                tzinfo=None
+            )
+
+        return parsed
+    except ValueError:
+        pass
+
+    formats = [
+        "%Y年%m月%d日 %H:%M:%S",
+        "%Y年%m月%d日 %H:%M",
+        "%Y年%m月%d日",
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%d %H:%M",
+        "%Y-%m-%d",
+        "%Y/%m/%d %H:%M:%S",
+        "%Y/%m/%d %H:%M",
+        "%Y/%m/%d",
+        "%Y.%m.%d %H:%M",
+        "%Y.%m.%d",
+        "%b %d, %Y %H:%M",
+        "%b %d, %Y",
+        "%B %d, %Y %H:%M",
+        "%B %d, %Y",
+    ]
+
+    for date_format in formats:
+        try:
+            return datetime.strptime(
+                text,
+                date_format,
+            )
+        except ValueError:
+            continue
+
+    # 从较长文本中抓取日期。
+    date_patterns = [
+        r"(20\d{2})年(\d{1,2})月(\d{1,2})日",
+        r"(20\d{2})[-/.](\d{1,2})[-/.](\d{1,2})",
+    ]
+
+    for pattern in date_patterns:
+        match = re.search(
+            pattern,
+            text,
+        )
+
+        if not match:
+            continue
+
+        try:
+            return datetime(
+                int(match.group(1)),
+                int(match.group(2)),
+                int(match.group(3)),
+            )
+        except ValueError:
+            continue
+
+    return None
+
+
+def is_within_requested_days(
+    publish_time_text: str,
+    days: int,
+) -> bool:
+    """
+    判断发布时间是否位于最近 days 个自然日内。
+
+    days <= 0 表示不启用时间限制。
+    """
+
+    if int(days) <= 0:
+        return True
+
+    publish_datetime = parse_publish_datetime(
+        publish_time_text
+    )
+
+    if publish_datetime is None:
+        return False
+
+    today = datetime.now().date()
+    earliest_date = today - timedelta(
+        days=int(days) - 1
+    )
+
+    return (
+        earliest_date
+        <= publish_datetime.date()
+        <= today
+    )
+
+
+def extract_web_publish_time(
+    soup: BeautifulSoup,
+    html: str,
+) -> str:
+    """
+    从普通网页的 meta、time 标签、JSON-LD 和正文中提取发布时间。
+    """
+
+    meta_candidates = [
+        ("property", "article:published_time"),
+        ("property", "og:published_time"),
+        ("name", "publishdate"),
+        ("name", "publish_date"),
+        ("name", "pubdate"),
+        ("name", "date"),
+        ("name", "timestamp"),
+        ("itemprop", "datePublished"),
+    ]
+
+    for attribute, value in meta_candidates:
+        tag = soup.find(
+            "meta",
+            attrs={
+                attribute: value,
+            },
+        )
+
+        if not tag:
+            continue
+
+        content = str(
+            tag.get("content", "")
+        ).strip()
+
+        if parse_publish_datetime(content):
+            return content
+
+    time_tags = soup.find_all(
+        "time"
+    )
+
+    for time_tag in time_tags:
+        candidate = str(
+            time_tag.get("datetime", "")
+            or time_tag.get_text(
+                " ",
+                strip=True,
+            )
+        ).strip()
+
+        if parse_publish_datetime(candidate):
+            return candidate
+
+    json_patterns = [
+        r'"datePublished"\s*:\s*"([^"]+)"',
+        r'"dateCreated"\s*:\s*"([^"]+)"',
+        r'"pubDate"\s*:\s*"([^"]+)"',
+        r'"publishTime"\s*:\s*"([^"]+)"',
+        r'"publish_time"\s*:\s*"([^"]+)"',
+    ]
+
+    for pattern in json_patterns:
+        match = re.search(
+            pattern,
+            html,
+            flags=re.IGNORECASE,
+        )
+
+        if (
+            match
+            and parse_publish_datetime(
+                match.group(1)
+            )
+        ):
+            return match.group(1).strip()
+
+    # 最后从页面顶部文本中尝试识别明确日期。
+    page_text = soup.get_text(
+        " ",
+        strip=True,
+    )[:5000]
+
+    text_patterns = [
+        r"20\d{2}年\d{1,2}月\d{1,2}日(?:\s+\d{1,2}:\d{2}(?::\d{2})?)?",
+        r"20\d{2}[-/.]\d{1,2}[-/.]\d{1,2}(?:\s+\d{1,2}:\d{2}(?::\d{2})?)?",
+    ]
+
+    for pattern in text_patterns:
+        match = re.search(
+            pattern,
+            page_text,
+        )
+
+        if (
+            match
+            and parse_publish_datetime(
+                match.group(0)
+            )
+        ):
+            return match.group(0)
+
+    return "未获取到发布时间"
+
+
+# ============================================================
 # 4. 普通网页搜索工具
 # ============================================================
 
 @function_tool
 def search_web_pages(
     keyword: str,
+    days: int = 7,
     max_results: int = 5,
 ) -> str:
     """
     使用浏览器搜索普通网页，不使用搜索 API。
+
+    days 会随搜索结果返回，后续抓取和保存时必须继续使用。
+    搜索页只能提供候选链接，最终时间判断以网页正文提取结果为准。
     """
 
     if not keyword.strip():
@@ -470,7 +741,15 @@ def search_web_pages(
             ensure_ascii=False,
         )
 
-    max_results = max(1, min(int(max_results), 20))
+    days = max(
+        1,
+        min(int(days), 3650),
+    )
+    max_results = max(
+        1,
+        min(int(max_results), 20),
+    )
+
     results = []
 
     search_url = (
@@ -505,15 +784,21 @@ def search_web_pages(
                 "li.b_algo h2 a"
             )
 
-            count = min(
+            # 多取一些候选项，因为抓取后还要执行时间过滤。
+            check_count = min(
                 links.count(),
-                max_results,
+                max_results * 4,
             )
 
-            for index in range(count):
+            for index in range(
+                check_count
+            ):
                 link = links.nth(index)
 
-                title = link.inner_text().strip()
+                title = (
+                    link.inner_text()
+                    .strip()
+                )
                 url = (
                     link.get_attribute("href")
                     or ""
@@ -521,6 +806,12 @@ def search_web_pages(
 
                 if not url.startswith(
                     ("http://", "https://")
+                ):
+                    continue
+
+                if any(
+                    item["url"] == url
+                    for item in results
                 ):
                     continue
 
@@ -539,8 +830,14 @@ def search_web_pages(
         {
             "success": True,
             "keyword": keyword,
-            "count": len(results),
+            "days": days,
+            "target_count": max_results,
+            "candidate_count": len(results),
             "results": results,
+            "notice": (
+                "这些只是候选链接。必须逐篇抓取正文，"
+                "提取 publish_time，并按 days 再次过滤。"
+            ),
         },
         ensure_ascii=False,
     )
@@ -553,7 +850,7 @@ def search_web_pages(
 @function_tool
 def scrape_webpage(url: str) -> str:
     """
-    打开普通网页，提取标题和正文。
+    打开普通网页，提取标题、来源、发布时间和正文。
     """
 
     parsed = urlparse(url.strip())
@@ -601,6 +898,45 @@ def scrape_webpage(url: str) -> str:
             "html.parser",
         )
 
+        publish_time = extract_web_publish_time(
+            soup=soup,
+            html=html,
+        )
+
+        title = (
+            soup.title.get_text(
+                " ",
+                strip=True,
+            )
+            if soup.title
+            else ""
+        )
+
+        site_name_tag = soup.find(
+            "meta",
+            attrs={
+                "property": "og:site_name",
+            },
+        )
+
+        account = ""
+
+        if site_name_tag:
+            account = str(
+                site_name_tag.get(
+                    "content",
+                    "",
+                )
+            ).strip()
+
+        if not account:
+            account = (
+                urlparse(final_url)
+                .netloc
+                .removeprefix("www.")
+            )
+
+        # 时间提取完成后再删除脚本等无关标签。
         for tag in soup(
             [
                 "script",
@@ -612,15 +948,6 @@ def scrape_webpage(url: str) -> str:
             ]
         ):
             tag.decompose()
-
-        title = (
-            soup.title.get_text(
-                " ",
-                strip=True,
-            )
-            if soup.title
-            else ""
-        )
 
         article_tag = (
             soup.select_one("article")
@@ -643,7 +970,9 @@ def scrape_webpage(url: str) -> str:
             if line.strip()
         ]
 
-        content = "\n".join(lines)[:15000]
+        content = "\n".join(
+            lines
+        )[:15000]
 
         if not content:
             return json.dumps(
@@ -659,6 +988,8 @@ def scrape_webpage(url: str) -> str:
             {
                 "success": True,
                 "title": title,
+                "account": account,
+                "publish_time": publish_time,
                 "url": final_url,
                 "content": content,
             },
@@ -698,6 +1029,7 @@ def save_webpage_analysis(
     evidence_level: str,
     is_promotional: str,
     selection_reason: str,
+    requested_days: int = 7,
 ) -> str:
     """
     将普通网页按照与微信公众号文章一致的完整结构保存。
@@ -727,6 +1059,32 @@ def save_webpage_analysis(
     ]
 
     article_url = article_url.strip()
+    requested_days = max(
+        1,
+        min(int(requested_days), 3650),
+    )
+
+    if not is_within_requested_days(
+        publish_time,
+        requested_days,
+    ):
+        if (
+            parse_publish_datetime(
+                publish_time
+            )
+            is None
+        ):
+            return (
+                "保存状态：filtered。"
+                f"未获取到可验证的发布时间，无法确认属于最近 "
+                f"{requested_days} 天，本次不保存。"
+            )
+
+        return (
+            "保存状态：filtered。"
+            f"发布时间 {publish_time} 不在最近 "
+            f"{requested_days} 天内，本次不保存。"
+        )
 
     if WEB_RESULTS_FILE.exists():
         with WEB_RESULTS_FILE.open(
@@ -859,7 +1217,40 @@ main_agent = Agent(
 搜索本身只负责找候选链接。
 不得仅根据搜索标题、摘要片段或搜索结果页直接评分。
 
-【二、抓取工具规则】
+【二、全局时间过滤规则】
+
+1. 用户指定“最近N天、最近一周、最近一个月”等时间范围时，
+   所有来源都必须执行相同的时间过滤，包括：
+   微信公众号、普通网页、新闻网站、公司官网、政府网站和搜索结果。
+
+2. 最近一周按7个自然日处理；最近一个月默认按30个自然日处理。
+
+3. 搜索结果页只能提供候选链接，不能证明发布时间。
+   必须抓取每篇正文并读取 scrape 工具返回的 publish_time。
+
+4. 普通网页搜索时：
+   - search_web_pages 必须接收 days；
+   - 对候选链接逐篇调用 scrape_webpage；
+   - 将抓取结果的 publish_time 与 days 比较；
+   - 只有时间符合的文章才能分析并保存；
+   - 满足数量上限后停止继续处理候选链接。
+
+5. 若 publish_time="未获取到发布时间" 或无法解析：
+   - 在有时间限制的任务中必须跳过；
+   - 不得调用保存工具，或由保存工具返回 filtered；
+   - 不得因为文章质量高而破例保存。
+
+6. 发布时间早于时间范围或晚于当前日期：
+   - 必须跳过；
+   - 不得分析后保存。
+
+7. 调用 save_webpage_analysis 时必须传入 requested_days。
+   保存工具会再次硬校验时间；其 filtered 状态必须忠实展示。
+
+8. 用户没有提出时间限制的单个链接分析，可明确使用 requested_days=0；
+   但搜索任务未指定时间时，默认最近7天。
+
+【三、抓取工具规则】
 
 1. 微信公众号链接：
    - 必须使用微信专用分析流程；
@@ -881,7 +1272,7 @@ main_agent = Agent(
 
 3. 不得绕过登录、验证码、付费墙或访问限制。
 
-【三、量子行业范围】
+【四、量子行业范围】
 
 包括但不限于：
 量子计算、量子通信、量子测量、量子精密测量、量子传感、
@@ -896,14 +1287,14 @@ main_agent = Agent(
 - reason 和 selection_reason 必须说明关联较弱
 - 用户要求保存时仍保存，便于审计和排除。
 
-【四、category】
+【五、category】
 
 只能优先从以下类别选择一个：
 融资、投资、并购、合作、合同订单、产品发布、技术研发、
 科研进展、政策、政府项目、产业园区、市场动态、人才招聘、
 会议活动、量子科普、非量子行业、其他。
 
-【五、主体提取】
+【六、主体提取】
 
 companies：
 - 提取重要公司、科研机构、大学、投资机构或政府部门；
@@ -922,7 +1313,7 @@ publish_time：
 - 无法获取时填写“未获取到发布时间”；
 - 不得猜测。
 
-【六、关键词】
+【七、关键词】
 
 keywords：
 - 提取3到6个关键词；
@@ -930,7 +1321,7 @@ keywords：
   合作类型、应用场景；
 - 使用中文顿号“、”分隔。
 
-【七、摘要】
+【八、摘要】
 
 summary：
 - 中文，不超过150字；
@@ -938,7 +1329,7 @@ summary：
   结果或影响是什么”；
 - 不得添加正文没有的信息。
 
-【八、重要程度】
+【九、重要程度】
 
 importance 只能为“高”“中”“低”。
 
@@ -957,7 +1348,7 @@ importance 只能为“高”“中”“低”。
 reason：
 用一句话解释重要程度。
 
-【九、五项评分】
+【十、五项评分】
 
 所有评分必须为0到100的整数，不能留空。
 
@@ -1004,7 +1395,7 @@ reason：
 - 20-39：明显转载或高度重复
 - 0-19：几乎无原创信息
 
-【十、结构化字段】
+【十一、结构化字段】
 
 source_type 优先选择：
 政府、公司官方、科研机构、大学、投资机构、
@@ -1033,7 +1424,7 @@ selection_reason：
 必须依据正文事实密度、相关性和行业影响，
 不得只根据标题判断。
 
-【十一、保存字段】
+【十二、保存字段】
 
 调用任何内容保存工具时，必须完整传入：
 
@@ -1043,9 +1434,12 @@ quality_score、importance_score、source_reliability_score、
 originality_score、source_type、technology_route、evidence_level、
 is_promotional、selection_reason。
 
+普通网页调用 save_webpage_analysis 时还必须传入 requested_days，
+其值必须与当前搜索任务的 days 完全一致。
+
 不得省略任何字段。
 
-【十二、搜索任务】
+【十三、搜索任务】
 
 1. 微信搜索：
    - 调用 search_wechat_articles；
@@ -1053,16 +1447,22 @@ is_promotional、selection_reason。
    - 未指定数量默认5篇；
    - 搜索工具会自动扩展相关搜索词。
 2. 普通网页搜索：
-   - 调用 search_web_pages；
-   - 对需要分析的结果逐个调用 scrape_webpage；
-   - 用户要求保存时逐个调用 save_webpage_analysis。
+   - 调用 search_web_pages，并传入用户要求的 days；
+   - 搜索结果只是候选项；
+   - 对候选结果逐个调用 scrape_webpage；
+   - 检查抓取结果中的 publish_time；
+   - 未获取到发布时间或超出 days 范围时必须跳过；
+   - 时间符合后才进行完整分析；
+   - 用户要求保存时调用 save_webpage_analysis，
+     并传入相同的 requested_days；
+   - 达到用户指定的有效文章数量后停止。
 3. 必须区分：
    - status="not_found"：没有搜到；
    - status="found_but_all_duplicate"：搜到了，但此前均已记录；
    - status="found_new"：搜到并有新增。
 4. 不得把 new_count=0 错误描述成 found_count=0。
 
-【十三、最终展示】
+【十四、最终展示】
 
 每篇被分析的内容，最终必须忠实展示：
 
