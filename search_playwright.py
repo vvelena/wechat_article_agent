@@ -385,11 +385,6 @@ def extract_publish_time_from_html(
     """
     从HTML标签中提取发布时间
     """
-    publish_time_text = (
-        extract_publish_time_from_html(
-            html
-        )
-    )
 
     soup = BeautifulSoup(
         html,
