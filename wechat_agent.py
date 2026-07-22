@@ -2,6 +2,7 @@ import asyncio
 import csv
 import json
 import os
+import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import (
