@@ -1,4 +1,3 @@
-import csv
 import re
 import time
 from datetime import datetime, timedelta
@@ -24,230 +23,30 @@ DATA_DIR = Path("data")
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 LINKS_FILE = DATA_DIR / "links.csv"
-SEARCH_LOG_FILE = DATA_DIR / "search_log.csv"
 
-# 默认使用最近3天滚动窗口。
-# main_agent.py 仍可在运行时动态修改 SEARCH_DAYS。
-SEARCH_DAYS = 3
-
-QUERY_INTERVAL_SECONDS = 5
-RESULT_INTERVAL_MILLISECONDS = 1800
-
-# 每个搜索词最多检查的候选数量。
-MAX_CANDIDATES_PER_QUERY = 40
-
-# 每个主题默认保留数量。
-DEFAULT_RESULTS_PER_QUERY = 2
+SEARCH_DAYS = 7
+QUERY_INTERVAL_SECONDS = 3
+RESULT_INTERVAL_MILLISECONDS = 1500
 
 
 # ============================================================
-# 2. 搜索关键词体系
+# 2. 搜索关键词
 # ============================================================
 
-TECHNOLOGY_QUERIES = [
+BASE_QUERIES = [
     "量子计算",
     "量子科技",
     "量子通信",
-    "量子测量",
-    "量子精密测量",
-    "量子传感",
     "量子芯片",
-    "量子软件",
-    "量子算法",
-    "量子云平台",
-    "量子安全",
-    "后量子密码",
-    "超导量子",
-    "离子阱量子计算",
-    "中性原子量子计算",
-    "光量子计算",
-    "硅量子点",
-    "拓扑量子",
-    "量子退火",
-    "相干伊辛机",
-]
-
-HIGH_PRIORITY_TECHNOLOGIES = [
-    "量子计算",
-    "量子通信",
-    "量子芯片",
-    "量子软件",
     "量子传感",
+    "量子软件",
+    "量子计算 融资",
+    "量子计算 合作",
+    "量子科技 政策",
+    "量子技术 突破",
+    "量子计算 产品",
     "后量子密码",
-    "超导量子",
-    "中性原子量子计算",
-    "光量子计算",
 ]
-
-EVENT_QUERIES = [
-    "融资",
-    "投资",
-    "并购",
-    "合作",
-    "签约",
-    "合同",
-    "订单",
-    "中标",
-    "产品发布",
-    "技术突破",
-    "科研进展",
-    "政策",
-    "政府项目",
-    "商业化",
-    "上市",
-    "IPO",
-]
-
-HIGH_PRIORITY_EVENTS = [
-    "融资",
-    "合作",
-    "产品发布",
-    "技术突破",
-    "科研进展",
-    "政策",
-    "商业化",
-]
-
-# 搜狗微信以中文资讯为主。
-# 这些英文词用于发现英文名称出现在中文公众号中的文章。
-ENGLISH_QUERIES = [
-    "quantum computing",
-    "quantum funding",
-    "quantum startup",
-    "quantum processor",
-    "post-quantum cryptography",
-    "superconducting quantum",
-    "neutral atom quantum",
-    "photonic quantum",
-]
-
-COMPANY_QUERIES = [
-    "IBM Quantum",
-    "Google Quantum AI",
-    "Microsoft Quantum",
-    "IonQ",
-    "Quantinuum",
-    "Rigetti",
-    "D-Wave",
-    "PsiQuantum",
-    "QuEra",
-    "Pasqal",
-    "本源量子",
-    "国盾量子",
-    "中电信量子",
-    "逻辑比特",
-    "中科量枢",
-    "玻色量子",
-    "图灵量子",
-]
-
-
-def build_coverage_queries(
-    include_english: bool = True,
-    include_companies: bool = True,
-) -> list[str]:
-    """
-    构建覆盖率优先的搜索词列表。
-
-    顺序：
-    1. 宽泛技术方向
-    2. 技术方向 × 高频事件
-    3. 英文主题
-    4. 重点公司和机构
-    """
-
-    queries: list[str] = []
-
-    queries.extend(
-        TECHNOLOGY_QUERIES
-    )
-
-    for technology in HIGH_PRIORITY_TECHNOLOGIES:
-        for event in HIGH_PRIORITY_EVENTS:
-            queries.append(
-                f"{technology} {event}"
-            )
-
-    if include_english:
-        queries.extend(
-            ENGLISH_QUERIES
-        )
-
-    if include_companies:
-        for company in COMPANY_QUERIES:
-            queries.extend(
-                [
-                    company,
-                    f"{company} 融资",
-                    f"{company} 产品",
-                    f"{company} 合作",
-                ]
-            )
-
-    # 保留原顺序去重。
-    return list(
-        dict.fromkeys(
-            query.strip()
-            for query in queries
-            if query.strip()
-        )
-    )
-
-
-def append_search_log(
-    query: str,
-    candidate_count: int,
-    valid_time_count: int,
-    duplicate_count: int,
-    found_count: int,
-    failure_reason: str = "",
-) -> None:
-    """
-    保存搜索过程日志，便于分析覆盖率。
-    """
-
-    fieldnames = [
-        "search_time",
-        "query",
-        "channel",
-        "days",
-        "candidate_count",
-        "valid_time_count",
-        "duplicate_count",
-        "found_count",
-        "failure_reason",
-    ]
-
-    row = {
-        "search_time": datetime.now().strftime(
-            "%Y-%m-%d %H:%M:%S"
-        ),
-        "query": query,
-        "channel": "搜狗微信",
-        "days": SEARCH_DAYS,
-        "candidate_count": candidate_count,
-        "valid_time_count": valid_time_count,
-        "duplicate_count": duplicate_count,
-        "found_count": found_count,
-        "failure_reason": failure_reason,
-    }
-
-    file_exists = SEARCH_LOG_FILE.exists()
-
-    with SEARCH_LOG_FILE.open(
-        mode="a",
-        newline="",
-        encoding="utf-8-sig",
-    ) as file:
-        writer = csv.DictWriter(
-            file,
-            fieldnames=fieldnames,
-        )
-
-        if not file_exists:
-            writer.writeheader()
-
-        writer.writerow(row)
 
 
 # ============================================================
@@ -459,7 +258,6 @@ def choose_valid_wechat_url(
     """
     从多个候选地址中选择一个有效的微信公众号文章链接。
     """
-
     for candidate_url in candidate_urls:
         normalized_url = normalize_wechat_url(
             candidate_url
@@ -523,22 +321,25 @@ def extract_real_wechat_url(
                 og_url
             )
 
-    for candidate_url in candidate_urls:
-        normalized_url = normalize_wechat_url(
-            candidate_url
-        )
-
-        if is_wechat_article_url(
-            normalized_url
-        ):
-            return normalized_url
-
-    return ""
+    return choose_valid_wechat_url(
+    candidate_urls
+)
 
 
 # ============================================================
 # 5. 发布时间提取
 # ============================================================
+def is_valid_publish_time_text(
+        text: str,
+) -> bool:
+    """
+    判断文本是否为支持的微信公众号发布时间格式。
+    """
+    return bool(
+        text
+        and parse_wechat_publish_time(text)
+        is not None
+    )
 
 def extract_publish_time_from_page(
     article_page,
@@ -576,10 +377,8 @@ def extract_publish_time_from_page(
         except Exception:
             continue
 
-        if (
+        if is_valid_publish_time_text(
             text
-            and parse_wechat_publish_time(text)
-            is not None
         ):
             return text
 
@@ -601,10 +400,8 @@ def extract_publish_time_from_page(
             strip=True,
         )
 
-        if (
+        if is_valid_publish_time_text(
             text
-            and parse_wechat_publish_time(text)
-            is not None
         ):
             return text
 
@@ -717,19 +514,32 @@ def build_queries(
     max_queries: int,
 ) -> list[str]:
     """
-    返回覆盖率优先的前 max_queries 个搜索词。
+    返回本次要执行的搜索词。
     """
 
-    all_queries = build_coverage_queries()
-
-    return all_queries[
-        :max_queries
-    ]
+    return BASE_QUERIES[:max_queries]
 
 
 # ============================================================
 # 8. 搜狗微信搜索
 # ============================================================
+def open_sogou_search_page(
+    page,
+    search_url: str,
+) -> None:
+    """
+    打开搜狗微信搜索页并等待页面完成基础加载。
+    """
+
+    page.goto(
+        search_url,
+        wait_until="domcontentloaded",
+        timeout=60_000,
+    )
+
+    page.wait_for_timeout(
+        3000
+    )
 
 def search_sogou_with_playwright(
     query: str,
@@ -744,10 +554,6 @@ def search_sogou_with_playwright(
     """
 
     found_links: list[str] = []
-    valid_time_count = 0
-    duplicate_count = 0
-    result_count = 0
-    failure_reason = ""
 
     search_url = (
         "https://weixin.sogou.com/weixin"
@@ -776,17 +582,15 @@ def search_sogou_with_playwright(
 
         page = context.new_page()
 
+        open_sogou_search_page(
+            page,
+            search_url,
+        )
         try:
-            page.goto(
+            open_sogou_search_page(
+                page,
                 search_url,
-                wait_until="domcontentloaded",
-                timeout=60_000,
             )
-
-            page.wait_for_timeout(
-                3000
-            )
-
             body_text = page.locator(
                 "body"
             ).inner_text()
@@ -803,18 +607,6 @@ def search_sogou_with_playwright(
                     "请手动完成验证后重新运行，"
                     "不要尝试自动绕过。"
                 )
-
-                failure_reason = "验证码或访问频率限制"
-
-                append_search_log(
-                    query=query,
-                    candidate_count=result_count,
-                    valid_time_count=valid_time_count,
-                    duplicate_count=duplicate_count,
-                    found_count=len(found_links),
-                    failure_reason=failure_reason,
-                )
-
                 return []
 
             result_links = page.locator(
@@ -846,22 +638,13 @@ def search_sogou_with_playwright(
                     f"[调试截图] {screenshot_file.resolve()}"
                 )
 
-                append_search_log(
-                    query=query,
-                    candidate_count=0,
-                    valid_time_count=0,
-                    duplicate_count=0,
-                    found_count=0,
-                    failure_reason="无搜索结果或页面结构变化",
-                )
-
                 return []
 
             check_count = min(
                 result_count,
                 max(
-                    MAX_CANDIDATES_PER_QUERY,
-                    max_results * 6,
+                    max_results * 4,
+                    max_results,
                 ),
             )
 
@@ -1046,7 +829,7 @@ def search_sogou_with_playwright(
                     if not publish_time_text:
                         print(
                             "[忽略] 未获取到发布时间，"
-                            f"无法确认是否属于近 {SEARCH_DAYS} 天。"
+                            "无法确认是否属于近 7 天。"
                         )
                         continue
 
@@ -1060,11 +843,7 @@ def search_sogou_with_playwright(
                         )
                         continue
 
-                    valid_time_count += 1
-
                     if final_url in found_links:
-                        duplicate_count += 1
-
                         print(
                             "[忽略重复] 本关键词中已发现该文章。"
                         )
@@ -1113,13 +892,9 @@ def search_sogou_with_playwright(
                         not in page.url
                     ):
                         try:
-                            page.goto(
+                            open_sogou_search_page(
+                                page,
                                 search_url,
-                                wait_until="domcontentloaded",
-                                timeout=60_000,
-                            )
-                            page.wait_for_timeout(
-                                3000
                             )
                         except Exception:
                             pass
@@ -1141,134 +916,133 @@ def search_sogou_with_playwright(
             context.close()
             browser.close()
 
-    append_search_log(
-        query=query,
-        candidate_count=result_count,
-        valid_time_count=valid_time_count,
-        duplicate_count=duplicate_count,
-        found_count=len(found_links),
-        failure_reason=failure_reason,
-    )
-
     return found_links
 
 
-def search_multiple_topics(
-    queries: list[str],
-    results_per_query: int = DEFAULT_RESULTS_PER_QUERY,
-) -> list[str]:
+# ============================================================
+# 9. 主程序
+# ============================================================
+def read_positive_integer(
+    prompt: str,
+    type_error_message: str,
+    range_error_message: str,
+) -> int | None:
     """
-    每个主题都单独搜索，再统一合并去重。
+    读取一个大于 0 的整数。
 
-    不会因为前面的主题已经搜够文章，
-    就跳过后续技术方向。
+    输入无效时打印原有提示并返回 None。
     """
 
-    discovered_links: list[str] = []
-    seen_links: set[str] = set()
+    value_text = input(
+        prompt
+    ).strip()
+
+    try:
+        value = int(
+            value_text
+        )
+    except ValueError:
+        print(
+            type_error_message
+        )
+        return None
+
+    if value <= 0:
+        print(
+            range_error_message
+        )
+        return None
+
+    return value
+
+def main() -> None:
+    print("=" * 60)
+    print("量子行业微信公众号自动搜索")
+    print(
+        f"时间范围：最近 {SEARCH_DAYS} 个自然日"
+    )
+    print("=" * 60)
+
+    max_queries = read_positive_integer(
+    prompt="本次执行多少个搜索词？建议第一次输入 3：",
+    type_error_message="搜索词数量必须是整数。",
+    range_error_message="搜索词数量必须大于 0。",
+)
+
+    if max_queries is None:
+        return
+
+        
+    queries = build_queries(
+        max_queries
+    )
+
+    max_results = read_positive_integer(
+        prompt="每个搜索词最多保留几篇？建议输入 3：",
+        type_error_message="结果数量必须是整数。",
+        range_error_message="每个搜索词的结果数量必须大于 0。",
+    )
+
+    if max_results is None:
+        return
+
+    existing_links = load_existing_links()
+    discovered_links = set(
+        existing_links
+    )
+
+    new_links: list[str] = []
 
     for index, query in enumerate(
         queries,
         start=1,
     ):
         print(
-            f"\n[{index}/{len(queries)}] 搜索主题：{query}"
+            f"\n[{index}/{len(queries)}]"
         )
 
         try:
-            results = search_sogou_with_playwright(
-                query=query,
-                max_results=results_per_query,
+            results = (
+                search_sogou_with_playwright(
+                    query=query,
+                    max_results=max_results,
+                )
             )
         except Exception as error:
             print(
-                f"[搜索失败] {query}：{error}"
+                f"搜索失败：{error}"
             )
             continue
 
+        new_count = 0
+
         for url in results:
-            if url in seen_links:
+            if url in discovered_links:
+                print(
+                    f"[已存在，跳过] {url}"
+                )
                 continue
 
-            seen_links.add(url)
-            discovered_links.append(url)
+            discovered_links.add(
+                url
+            )
+            new_links.append(
+                url
+            )
+            new_count += 1
+
+            print(
+                f"[加入待处理列表] {url}"
+            )
+
+        print(
+            f"[本关键词新增] {new_count} 篇"
+        )
 
         if index < len(queries):
             time.sleep(
                 QUERY_INTERVAL_SECONDS
             )
-
-    return discovered_links
-
-
-# ============================================================
-# 9. 主程序
-# ============================================================
-
-def main() -> None:
-    print("=" * 60)
-    print("量子行业微信公众号覆盖率优先搜索")
-    print(
-        f"滚动时间窗口：最近 {SEARCH_DAYS} 个自然日"
-    )
-    print("=" * 60)
-
-    max_queries_text = input(
-        "本次执行多少个搜索词？建议第一次输入10："
-    ).strip()
-
-    try:
-        max_queries = int(
-            max_queries_text
-        )
-    except ValueError:
-        print(
-            "搜索词数量必须是整数。"
-        )
-        return
-
-    results_per_query_text = input(
-        "每个搜索词最多保留几篇？建议输入2："
-    ).strip()
-
-    try:
-        results_per_query = int(
-            results_per_query_text
-        )
-    except ValueError:
-        print(
-            "结果数量必须是整数。"
-        )
-        return
-
-    if max_queries <= 0:
-        print(
-            "搜索词数量必须大于0。"
-        )
-        return
-
-    if results_per_query <= 0:
-        print(
-            "每个搜索词的结果数量必须大于0。"
-        )
-        return
-
-    queries = build_queries(
-        max_queries=max_queries
-    )
-
-    existing_links = load_existing_links()
-
-    discovered_links = search_multiple_topics(
-        queries=queries,
-        results_per_query=results_per_query,
-    )
-
-    new_links = [
-        url
-        for url in discovered_links
-        if url not in existing_links
-    ]
 
     append_new_links(
         new_links
@@ -1278,13 +1052,7 @@ def main() -> None:
     print("搜索完成")
     print("=" * 60)
     print(
-        f"执行搜索词：{len(queries)}"
-    )
-    print(
         f"原有链接：{len(existing_links)}"
-    )
-    print(
-        f"合并后候选：{len(discovered_links)}"
     )
     print(
         f"本次新发现：{len(new_links)}"
@@ -1292,10 +1060,8 @@ def main() -> None:
     print(
         f"链接文件：{LINKS_FILE.resolve()}"
     )
-    print(
-        f"搜索日志：{SEARCH_LOG_FILE.resolve()}"
-    )
 
 
 if __name__ == "__main__":
     main()
+    
