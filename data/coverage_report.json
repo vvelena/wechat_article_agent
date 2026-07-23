@@ -1,0 +1,87 @@
+{
+  "metric_type": "internal_coverage",
+  "days": 0,
+  "original_record_count": 25,
+  "analyzed_record_count": 25,
+  "invalid_publish_time_count": 0,
+  "category_coverage": 0.6667,
+  "covered_categories": [
+    "产品发布",
+    "合作",
+    "市场动态",
+    "技术研发",
+    "政府项目",
+    "政策",
+    "科研进展",
+    "融资"
+  ],
+  "missing_categories": [
+    "产业园区",
+    "合同订单",
+    "并购",
+    "投资"
+  ],
+  "technology_route_coverage": 0.7857,
+  "covered_technology_routes": [
+    "中性原子",
+    "光量子",
+    "后量子密码",
+    "相干伊辛机",
+    "硅量子点",
+    "离子阱",
+    "超导量子",
+    "量子测量",
+    "量子算法",
+    "量子软件",
+    "量子通信"
+  ],
+  "missing_technology_routes": [
+    "拓扑量子",
+    "量子传感",
+    "量子退火"
+  ],
+  "source_type_coverage": 0.75,
+  "covered_source_types": [
+    "公司官方",
+    "投资机构",
+    "科研机构",
+    "综合媒体",
+    "自媒体",
+    "行业媒体"
+  ],
+  "missing_source_types": [
+    "大学",
+    "政府"
+  ],
+  "time_coverage": 0,
+  "target_days": 0,
+  "covered_days": 0,
+  "field_completeness": 0.994,
+  "field_completeness_detail": {
+    "publish_time": 1.0,
+    "title": 1.0,
+    "account": 1.0,
+    "article_url": 1.0,
+    "category": 1.0,
+    "companies": 0.92,
+    "keywords": 1.0,
+    "summary": 1.0,
+    "importance": 1.0,
+    "reason": 1.0,
+    "relevance_score": 1.0,
+    "quality_score": 1.0,
+    "importance_score": 1.0,
+    "source_reliability_score": 1.0,
+    "originality_score": 1.0,
+    "source_type": 1.0,
+    "technology_route": 0.96,
+    "evidence_level": 1.0,
+    "is_promotional": 1.0,
+    "selection_reason": 1.0
+  },
+  "top5_source_share": 0.24,
+  "high_value_count": 16,
+  "high_value_rate": 0.64,
+  "overall_internal_coverage": 0.6518,
+  "important_note": "内部覆盖率表示数据是否覆盖预设分类、技术路线、来源类型、时间与字段范围，不等于全网资讯覆盖率。"
+}

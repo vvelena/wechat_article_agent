@@ -1,0 +1,6 @@
+openai
+openai-agents
+playwright
+beautifulsoup4
+python-dotenv
+pandas

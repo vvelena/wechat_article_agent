@@ -21,6 +21,7 @@ from playwright.sync_api import sync_playwright
 
 import search_playwright as search_module
 import wechat_agent as article_module
+import coverage_analysis as coverage_module
 
 
 # ============================================================
@@ -1187,6 +1188,179 @@ def save_webpage_analysis(
 # 6. 总控 Agent
 # ============================================================
 
+
+
+# ============================================================
+# 6. 覆盖率分析工具
+# ============================================================
+
+@function_tool
+def calculate_internal_coverage(
+    days: int = 0,
+) -> str:
+    """
+    计算内部覆盖率。
+
+    days=0 表示分析全部已有数据；
+    days>0 表示只分析最近指定自然日的数据。
+    """
+
+    try:
+        days = max(
+            0,
+            min(int(days), 3650),
+        )
+
+        result = (
+            coverage_module
+            .calculate_internal_coverage(
+                days=days,
+            )
+        )
+
+        report_file = (
+            coverage_module
+            .save_report(result)
+        )
+
+        return json.dumps(
+            {
+                "success": True,
+                "report_text": (
+                    coverage_module
+                    .format_internal_report(
+                        result
+                    )
+                ),
+                "report": result,
+                "report_file": str(
+                    report_file.resolve()
+                ),
+            },
+            ensure_ascii=False,
+        )
+
+    except Exception as error:
+        return json.dumps(
+            {
+                "success": False,
+                "error": str(error),
+            },
+            ensure_ascii=False,
+        )
+
+
+@function_tool
+def create_benchmark_events_template() -> str:
+    """
+    创建相对覆盖率所需的基准事件表模板。
+    """
+
+    try:
+        template_file = (
+            coverage_module
+            .create_benchmark_template()
+        )
+
+        return json.dumps(
+            {
+                "success": True,
+                "message": (
+                    "基准事件表已准备好。"
+                    "请在 data/benchmark_events.csv 中"
+                    "删除 example_ 开头的示例行，"
+                    "再填写真实基准事件。"
+                ),
+                "template_file": str(
+                    template_file.resolve()
+                ),
+            },
+            ensure_ascii=False,
+        )
+
+    except Exception as error:
+        return json.dumps(
+            {
+                "success": False,
+                "error": str(error),
+            },
+            ensure_ascii=False,
+        )
+
+
+@function_tool
+def calculate_relative_coverage(
+    days: int = 0,
+    match_threshold: float = 0.55,
+    important_only: bool = True,
+) -> str:
+    """
+    根据 data/benchmark_events.csv 计算相对事件覆盖率。
+
+    days=0 表示比较全部数据；
+    match_threshold 建议保持默认 0.55；
+    important_only=true 时只比较高、中重要事件。
+    """
+
+    try:
+        days = max(
+            0,
+            min(int(days), 3650),
+        )
+
+        match_threshold = max(
+            0.30,
+            min(
+                float(match_threshold),
+                0.95,
+            ),
+        )
+
+        result = (
+            coverage_module
+            .calculate_relative_coverage(
+                days=days,
+                match_threshold=(
+                    match_threshold
+                ),
+                important_only=(
+                    bool(important_only)
+                ),
+            )
+        )
+
+        report_file = (
+            coverage_module
+            .save_report(result)
+        )
+
+        return json.dumps(
+            {
+                "success": True,
+                "report_text": (
+                    coverage_module
+                    .format_relative_report(
+                        result
+                    )
+                ),
+                "report": result,
+                "report_file": str(
+                    report_file.resolve()
+                ),
+            },
+            ensure_ascii=False,
+        )
+
+    except Exception as error:
+        return json.dumps(
+            {
+                "success": False,
+                "error": str(error),
+            },
+            ensure_ascii=False,
+        )
+
+
 main_agent = Agent(
     name="资讯搜索抓取总控智能体",
     model=deepseek_model,
@@ -1462,7 +1636,22 @@ is_promotional、selection_reason。
    - status="found_new"：搜到并有新增。
 4. 不得把 new_count=0 错误描述成 found_count=0。
 
-【十四、最终展示】
+【十四、覆盖率分析】
+
+当用户要求“内部覆盖率”时：
+- 调用 calculate_internal_coverage；
+- 未指定时间时 days=0，分析全部已有数据；
+- 必须明确说明内部覆盖率不等于全网覆盖率。
+
+当用户要求“相对覆盖率”时：
+- 先确认 data/benchmark_events.csv 是否已有真实基准事件；
+- 如果没有，调用 create_benchmark_events_template；
+- 告诉用户填写基准事件后，再调用 calculate_relative_coverage；
+- 不得在只有示例行时编造相对覆盖率；
+- 相对覆盖率按事件匹配，不按文章标题完全一致判断；
+- 自动匹配结果属于辅助判断，边界结果需要人工复核。
+
+【十五、最终展示】
 
 每篇被分析的内容，最终必须忠实展示：
 
@@ -1504,6 +1693,9 @@ is_promotional、selection_reason。
         search_web_pages,
         scrape_webpage,
         save_webpage_analysis,
+        calculate_internal_coverage,
+        create_benchmark_events_template,
+        calculate_relative_coverage,
     ],
 )
 
@@ -1525,6 +1717,9 @@ async def main() -> None:
         "搜索 IBM 量子计算最新进展的普通网页，最多3篇并总结\n"
         "分析这个网页：https://example.com/article\n"
         "处理 data/links.csv 中的全部微信文章\n"
+        "计算全部数据的内部覆盖率\n"
+        "创建相对覆盖率基准事件模板\n"
+        "计算最近7天的相对覆盖率\n"
     )
 
     while True:
