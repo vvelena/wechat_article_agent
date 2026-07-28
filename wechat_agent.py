@@ -164,11 +164,7 @@ def is_within_last_days(
 
 def normalize_wechat_url(url: str) -> str:
     """
-    标准化微信公众号文章链接。
-
-    已经包含 __biz、mid、idx、sn 的链接会被整理为稳定链接；
-    只有 timestamp、signature 等参数的搜狗签名链接暂时保留，
-    等文章打开后再从页面中提取稳定链接。
+    标准化微信公众号文章链接，同时保留访问文章所需参数。
     """
 
     cleaned = str(url).strip()
@@ -199,229 +195,36 @@ def normalize_wechat_url(url: str) -> str:
             parsed.query,
             keep_blank_values=False,
         )
-        query_params = dict(query_items)
 
-        stable_keys = {
+        allowed_keys = {
             "__biz",
             "mid",
             "idx",
             "sn",
-        }
-
-        if stable_keys.issubset(query_params):
-            filtered_query = [
-                (key, query_params[key])
-                for key in (
-                    "__biz",
-                    "mid",
-                    "idx",
-                    "sn",
-                )
-            ]
-
-            normalized = parsed._replace(
-                scheme="https",
-                netloc="mp.weixin.qq.com",
-                query=urlencode(filtered_query),
-                fragment="",
-            )
-            return urlunparse(normalized)
-
-        # 搜狗搜索返回的签名链接仍要保留，否则文章可能无法打开。
-        signed_keys = {
+            "chksm",
             "src",
             "timestamp",
             "ver",
             "signature",
+            "new",
         }
 
-        if signed_keys.issubset(query_params):
-            filtered_query = [
-                (key, value)
-                for key, value in query_items
-                if key in {
-                    "src",
-                    "timestamp",
-                    "ver",
-                    "signature",
-                    "new",
-                }
-            ]
+        filtered_query = [
+            (key, value)
+            for key, value in query_items
+            if key in allowed_keys
+        ]
 
-            normalized = parsed._replace(
-                scheme="https",
-                netloc="mp.weixin.qq.com",
-                query=urlencode(filtered_query),
-                fragment="",
-            )
-            return urlunparse(normalized)
+        normalized = parsed._replace(
+            scheme="https",
+            netloc="mp.weixin.qq.com",
+            query=urlencode(filtered_query),
+            fragment="",
+        )
+        return urlunparse(normalized)
 
     return cleaned
 
-
-def extract_permanent_wechat_url(
-    html: str,
-    current_url: str,
-) -> str | None:
-    """
-    从已打开的微信文章页面中提取真正稳定的文章链接。
-
-    只有以下两类链接才视为稳定链接：
-    1. https://mp.weixin.qq.com/s/文章短码
-    2. 同时包含 __biz、mid、idx、sn 的标准链接
-
-    提取不到时返回 None，绝不把带 timestamp/signature 的临时链接
-    冒充为永久链接。
-    """
-
-    def clean_candidate(value: str) -> str:
-        candidate = str(value or "").strip()
-        candidate = (
-            candidate
-            .replace("\\u0026", "&")
-            .replace("\\x26", "&")
-            .replace("&amp;", "&")
-            .replace("\\/", "/")
-        )
-        return candidate
-
-    def stable_url_from_candidate(value: str) -> str | None:
-        candidate = clean_candidate(value)
-        if not candidate:
-            return None
-
-        normalized = normalize_wechat_url(candidate)
-        parsed = urlparse(normalized)
-
-        if (parsed.hostname or "").lower() != "mp.weixin.qq.com":
-            return None
-
-        if parsed.path.startswith("/s/") and len(parsed.path) > 3:
-            return normalized
-
-        if parsed.path != "/s":
-            return None
-
-        params = dict(
-            parse_qsl(
-                parsed.query,
-                keep_blank_values=False,
-            )
-        )
-
-        stable_keys = {"__biz", "mid", "idx", "sn"}
-        if not stable_keys.issubset(params):
-            return None
-
-        query = urlencode(
-            [
-                ("__biz", params["__biz"]),
-                ("mid", params["mid"]),
-                ("idx", params["idx"]),
-                ("sn", params["sn"]),
-            ]
-        )
-        return f"https://mp.weixin.qq.com/s?{query}"
-
-    soup = BeautifulSoup(html, "html.parser")
-
-    # 1. 优先读取页面声明的标准地址。
-    url_candidates: list[str] = []
-
-    canonical_tag = soup.find("link", attrs={"rel": "canonical"})
-    if canonical_tag:
-        url_candidates.append(
-            str(canonical_tag.get("href", ""))
-        )
-
-    for property_name in ("og:url", "twitter:url"):
-        tag = soup.find(
-            "meta",
-            attrs={"property": property_name},
-        )
-        if tag:
-            url_candidates.append(
-                str(tag.get("content", ""))
-            )
-
-    # 当前地址只有本身已经稳定时才接受。
-    url_candidates.append(current_url)
-
-    for candidate in url_candidates:
-        stable_url = stable_url_from_candidate(candidate)
-        if stable_url:
-            return stable_url
-
-    # 2. 在整个 HTML 中搜索完整标准链接。
-    full_url_patterns = [
-        r'https?:\\?/\\?/mp\.weixin\.qq\.com\\?/s\\?/[^"\'<>\s]+',
-        r'https?://mp\.weixin\.qq\.com/s\?[^"\'<>\s]+',
-    ]
-
-    for pattern in full_url_patterns:
-        for match in re.finditer(pattern, html, flags=re.IGNORECASE):
-            stable_url = stable_url_from_candidate(match.group(0))
-            if stable_url:
-                return stable_url
-
-    # 3. 从微信页面脚本变量中提取四个稳定参数。
-    def find_script_value(patterns: list[str]) -> str:
-        for pattern in patterns:
-            match = re.search(
-                pattern,
-                html,
-                flags=re.IGNORECASE,
-            )
-            if match:
-                return clean_candidate(match.group(1))
-        return ""
-
-    biz = find_script_value(
-        [
-            r'["\']__biz["\']\s*[:=]\s*["\']([^"\']+)["\']',
-            r'\bvar\s+biz\s*=\s*["\']([^"\']+)["\']',
-            r'\bbiz\s*:\s*["\']([^"\']+)["\']',
-            r'__biz=([^&"\'<>\\]+)',
-        ]
-    )
-    mid = find_script_value(
-        [
-            r'["\']mid["\']\s*[:=]\s*["\']?(\d+)["\']?',
-            r'\bvar\s+mid\s*=\s*["\']?(\d+)["\']?',
-            r'\bvar\s+appmsgid\s*=\s*["\']?(\d+)["\']?',
-            r'["\']appmsgid["\']\s*[:=]\s*["\']?(\d+)["\']?',
-            r'(?:[?&]|&amp;)mid=(\d+)',
-        ]
-    )
-    idx = find_script_value(
-        [
-            r'["\']idx["\']\s*[:=]\s*["\']?(\d+)["\']?',
-            r'\bvar\s+idx\s*=\s*["\']?(\d+)["\']?',
-            r'\bvar\s+itemidx\s*=\s*["\']?(\d+)["\']?',
-            r'["\']itemidx["\']\s*[:=]\s*["\']?(\d+)["\']?',
-            r'(?:[?&]|&amp;)idx=(\d+)',
-        ]
-    )
-    sn = find_script_value(
-        [
-            r'["\']sn["\']\s*[:=]\s*["\']([0-9a-fA-F]+)["\']',
-            r'\bvar\s+sn\s*=\s*["\']([0-9a-fA-F]+)["\']',
-            r'(?:[?&]|&amp;)sn=([0-9a-fA-F]+)',
-        ]
-    )
-
-    if all([biz, mid, idx, sn]):
-        query = urlencode(
-            [
-                ("__biz", biz),
-                ("mid", mid),
-                ("idx", idx),
-                ("sn", sn),
-            ]
-        )
-        return f"https://mp.weixin.qq.com/s?{query}"
-
-    return None
 
 def is_valid_wechat_url(url: str) -> bool:
     """
@@ -789,23 +592,9 @@ def scrape_wechat_article(url: str) -> str:
             )
 
             html = page.content()
-            final_url = page.url
 
             context.close()
             browser.close()
-
-        permanent_url = extract_permanent_wechat_url(
-            html=html,
-            current_url=final_url,
-        )
-
-        if permanent_url is None:
-            print(
-                "[永久链接提取失败] 页面未提供 __biz、mid、idx、sn "
-                "或 /s/ 短链接；本次不会把临时签名链接当作永久链接。"
-            )
-
-        article_url_for_save = permanent_url or normalized_url
 
         soup = BeautifulSoup(
             html,
@@ -869,7 +658,7 @@ def scrape_wechat_article(url: str) -> str:
             "title": title,
             "account": account,
             "publish_time": publish_time,
-            "article_url": article_url_for_save,
+            "article_url": normalized_url,
             "content": content,
         }
 
@@ -877,10 +666,6 @@ def scrape_wechat_article(url: str) -> str:
         print(f"[标题] {title}")
         print(f"[公众号] {account}")
         print(f"[发布时间] {publish_time}")
-        if permanent_url:
-            print(f"[永久链接] {permanent_url}")
-        else:
-            print(f"[临时访问链接] {normalized_url}")
         print(f"[正文长度] {len(content)} 字符")
 
         return json.dumps(
@@ -1096,9 +881,7 @@ wechat_agent = Agent(
    - 不得调用 save_article_analysis；
    - 不得编造文章信息。
 3. 如果 success=true：
-   - 阅读标题、公众号、发布时间、正文和抓取工具返回的 article_url；
-   - 保存时必须使用 scrape_wechat_article 返回的 article_url，
-     不得继续使用任务文本中原始的搜狗签名链接；
+   - 阅读标题、公众号、发布时间和正文；
    - 进行分析；
    - 只调用一次 save_article_analysis。
 4. 调用 save_article_analysis 后，无论返回 saved、duplicate 或 failed，
