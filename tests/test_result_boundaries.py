@@ -1,3 +1,4 @@
+import csv
 import tempfile
 import unittest
 from pathlib import Path
@@ -69,6 +70,36 @@ class ResultBoundaryTests(unittest.TestCase):
 
             with self.assertRaisesRegex(ValueError, "缺少字段"):
                 ensure_csv_schema(csv_file, RESULT_FIELDS)
+
+    def test_legacy_result_schema_adds_collected_at(self) -> None:
+        legacy_fields = [
+            field
+            for field in RESULT_FIELDS
+            if field != "collected_at"
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            csv_file = Path(directory) / "results.csv"
+            csv_file.write_text(
+                ",".join(legacy_fields)
+                + "\n"
+                + ",".join(["value"] * len(legacy_fields))
+                + "\n",
+                encoding="utf-8-sig",
+            )
+
+            ensure_csv_schema(csv_file, RESULT_FIELDS)
+
+            with csv_file.open(
+                encoding="utf-8-sig",
+                newline="",
+            ) as file:
+                rows = list(csv.DictReader(file))
+
+            self.assertEqual(
+                list(rows[0]),
+                RESULT_FIELDS,
+            )
+            self.assertEqual(rows[0]["collected_at"], "")
 
     def test_data_path_is_project_relative(self) -> None:
         self.assertEqual(DATA_DIR, PROJECT_ROOT / "data")

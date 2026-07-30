@@ -8,6 +8,9 @@ from app.core.paths import (
     WECHAT_RESULTS_FILE,
 )
 from app.core.csv_admin import clear_csv_data
+from app.report.daily_word import (
+    generate_daily_word_report as build_daily_word_report,
+)
 from app.web.publish_time import extract_web_publish_time
 from app.web.result_store import save_webpage_analysis
 from app.wechat.link_store import load_article_urls
@@ -800,6 +803,39 @@ def clear_table_data(target: str) -> str:
         )
 
 
+@function_tool
+def generate_daily_word_report(
+    report_date: str = "",
+    max_items: int = 0,
+) -> str:
+    """
+    将指定日期收集的微信和网页结果整理成 Word 日报。
+
+    report_date 为空时使用北京时间今天，或传 YYYY-MM-DD；
+    max_items=0 表示收录筛选去重后的全部资讯；
+    用户明确限制数量时传入对应的正整数。
+    """
+
+    try:
+        result = build_daily_word_report(
+            report_date=report_date,
+            max_items=max_items,
+        )
+        return json.dumps(
+            result,
+            ensure_ascii=False,
+        )
+    except Exception as error:
+        return json.dumps(
+            {
+                "success": False,
+                "status": "failed",
+                "error": str(error),
+            },
+            ensure_ascii=False,
+        )
+
+
 # ============================================================
 # 6. 总控 Agent
 # ============================================================
@@ -1099,7 +1135,21 @@ is_promotional、selection_reason。
 4. 清空只删除数据行并保留标准表头。不得通过该工具操作其他文件。
 5. 必须忠实展示工具返回的每个文件清空前、清空后的记录数。
 
-【十五、最终展示】
+【十五、Word 日报】
+
+1. 用户要求“生成今天的日报”“整理当日数据为Word日报”时，
+   调用 generate_daily_word_report，report_date 传空字符串。
+2. 用户指定日期时，report_date 必须传 YYYY-MM-DD。
+3. 用户未指定条数时 max_items=0，收录筛选去重后的全部资讯；
+   只有用户明确要求“最多 N 条”时才传入对应的正整数。
+4. 日报合并 wechat_results.csv 和 web_results.csv，
+   按 collected_at 的北京时间日期筛选。
+5. 旧数据没有 collected_at 时，工具会临时按 publish_time 兼容筛选，
+   返回的 legacy_fallback_count 必须如实说明。
+6. status=no_data 时不得声称已生成文件。
+7. status=generated 时必须展示 output_file、selected_count 和标题列表。
+
+【十六、最终展示】
 
 每篇被分析的内容，最终必须忠实展示：
 
@@ -1142,6 +1192,7 @@ is_promotional、selection_reason。
         scrape_webpage,
         save_webpage_analysis,
         clear_table_data,
+        generate_daily_word_report,
     ],
 )
 
@@ -1164,6 +1215,7 @@ async def main() -> None:
         "处理 data/links.csv 中的全部微信文章\n"
         "清空微信结果表的数据\n"
         "清空全部表格数据\n"
+        "将今天收集的数据整理成Word日报\n"
         "搜索最近3天量子行业微信公众号文章，执行10个搜索词，每个搜索词最多保留2篇，合并去重后抓取正文，按统一规则分析并保存。\n"
     )
 

@@ -6,6 +6,7 @@ from agents import function_tool
 from app.core.paths import WEB_RESULTS_FILE
 from app.core.result_schema import (
     RESULT_FIELDS,
+    current_china_time_text,
     ensure_csv_schema,
 )
 from app.web.publish_time import (
@@ -163,6 +164,7 @@ def save_webpage_analysis(
         "selection_reason": str(
             selection_reason
         ).strip(),
+        "collected_at": current_china_time_text(),
     }
 
     file_exists = WEB_RESULTS_FILE.exists()

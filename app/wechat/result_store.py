@@ -7,6 +7,7 @@ from agents import function_tool
 from app.core.paths import WECHAT_RESULTS_FILE
 from app.core.result_schema import (
     RESULT_FIELDS,
+    current_china_time_text,
     ensure_csv_schema,
 )
 from app.wechat.url_utils import (
@@ -330,6 +331,7 @@ def save_article_analysis(
             "evidence_level": evidence_level,
             "is_promotional": is_promotional,
             "selection_reason": str(selection_reason).strip(),
+            "collected_at": current_china_time_text(),
         }
 
         file_exists = OUTPUT_FILE.exists()
