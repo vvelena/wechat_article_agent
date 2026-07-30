@@ -1,12 +1,15 @@
 import asyncio
-import csv
 import json
 import os
-import re
-from datetime import datetime, timedelta, timezone
-from pathlib import Path
 from urllib.parse import quote_plus, urlparse
 
+from app.core.paths import (
+    DATA_DIR,
+    WECHAT_RESULTS_FILE,
+)
+from app.web.publish_time import extract_web_publish_time
+from app.web.result_store import save_webpage_analysis
+from app.wechat.link_store import load_article_urls
 from agents import (
     Agent,
     Runner,
@@ -19,9 +22,8 @@ from dotenv import load_dotenv
 from openai import AsyncOpenAI
 from playwright.sync_api import sync_playwright
 
-import search_playwright as search_module
-import wechat_agent as article_module
-import coverage_analysis as coverage_module
+from app.wechat import agent as article_module
+from app.wechat import search as search_module
 
 
 # ============================================================
@@ -38,10 +40,7 @@ if not DEEPSEEK_API_KEY:
         "没有找到 DEEPSEEK_API_KEY，请检查项目根目录中的 .env 文件。"
     )
 
-DATA_DIR = Path("data")
 DATA_DIR.mkdir(parents=True, exist_ok=True)
-
-WEB_RESULTS_FILE = DATA_DIR / "web_results.csv"
 
 set_tracing_disabled(True)
 
@@ -172,6 +171,7 @@ def search_wechat_articles(
     搜索微信公众号文章，并把新链接加入 data/links.csv。
 
     会自动扩展多个相关搜索词，再合并去重。
+    days=0 表示不限制发布时间；未指定时默认最近 7 天。
     """
 
     if not keyword.strip():
@@ -183,7 +183,7 @@ def search_wechat_articles(
             ensure_ascii=False,
         )
 
-    days = max(1, min(int(days), 365))
+    days = max(0, min(int(days), 365))
     max_results = max(1, min(int(max_results), 20))
 
     search_queries = build_wechat_search_queries(
@@ -193,7 +193,10 @@ def search_wechat_articles(
     print("\n[总控工具] 搜索微信公众号文章")
     print(f"[用户主题] {keyword}")
     print(f"[搜索词] {'、'.join(search_queries)}")
-    print(f"[时间范围] 最近 {days} 个自然日")
+    if days > 0:
+        print(f"[时间范围] 最近 {days} 个自然日")
+    else:
+        print("[时间范围] 不限日期")
     print(f"[最多保留] {max_results} 篇")
 
     search_module.SEARCH_DAYS = days
@@ -439,7 +442,7 @@ async def analyze_wechat_articles(
             "failed": failed,
             "details": details,
             "result_file": str(
-                article_module.OUTPUT_FILE.resolve()
+                WECHAT_RESULTS_FILE.resolve()
             ),
         },
         ensure_ascii=False,
@@ -453,7 +456,7 @@ async def analyze_links_file() -> str:
     """
 
     try:
-        urls = article_module.load_article_urls()
+        urls = load_article_urls()
     except Exception as error:
         return json.dumps(
             {
@@ -472,248 +475,6 @@ async def analyze_links_file() -> str:
             ensure_ascii=False,
         ),
     )
-
-
-# ============================================================
-# 4. 通用时间提取与过滤
-# ============================================================
-
-def parse_publish_datetime(
-    publish_time_text: str,
-) -> datetime | None:
-    """
-    将常见中文、英文和 ISO 发布时间转换为 datetime。
-    """
-
-    text = str(publish_time_text).strip()
-
-    if (
-        not text
-        or text in {
-            "未获取到发布时间",
-            "未知",
-            "无",
-            "None",
-        }
-    ):
-        return None
-
-    text = text.replace("T", " ")
-    text = re.sub(
-        r"\s+(UTC|GMT)$",
-        "",
-        text,
-        flags=re.IGNORECASE,
-    ).strip()
-
-    # ISO 8601，包括时区形式。
-    iso_candidate = text.replace(
-        "Z",
-        "+00:00",
-    )
-
-    try:
-        parsed = datetime.fromisoformat(
-            iso_candidate
-        )
-
-        if parsed.tzinfo is not None:
-            parsed = parsed.astimezone().replace(
-                tzinfo=None
-            )
-
-        return parsed
-    except ValueError:
-        pass
-
-    formats = [
-        "%Y年%m月%d日 %H:%M:%S",
-        "%Y年%m月%d日 %H:%M",
-        "%Y年%m月%d日",
-        "%Y-%m-%d %H:%M:%S",
-        "%Y-%m-%d %H:%M",
-        "%Y-%m-%d",
-        "%Y/%m/%d %H:%M:%S",
-        "%Y/%m/%d %H:%M",
-        "%Y/%m/%d",
-        "%Y.%m.%d %H:%M",
-        "%Y.%m.%d",
-        "%b %d, %Y %H:%M",
-        "%b %d, %Y",
-        "%B %d, %Y %H:%M",
-        "%B %d, %Y",
-    ]
-
-    for date_format in formats:
-        try:
-            return datetime.strptime(
-                text,
-                date_format,
-            )
-        except ValueError:
-            continue
-
-    # 从较长文本中抓取日期。
-    date_patterns = [
-        r"(20\d{2})年(\d{1,2})月(\d{1,2})日",
-        r"(20\d{2})[-/.](\d{1,2})[-/.](\d{1,2})",
-    ]
-
-    for pattern in date_patterns:
-        match = re.search(
-            pattern,
-            text,
-        )
-
-        if not match:
-            continue
-
-        try:
-            return datetime(
-                int(match.group(1)),
-                int(match.group(2)),
-                int(match.group(3)),
-            )
-        except ValueError:
-            continue
-
-    return None
-
-
-def is_within_requested_days(
-    publish_time_text: str,
-    days: int,
-) -> bool:
-    """
-    判断发布时间是否位于最近 days 个自然日内。
-
-    days <= 0 表示不启用时间限制。
-    """
-
-    if int(days) <= 0:
-        return True
-
-    publish_datetime = parse_publish_datetime(
-        publish_time_text
-    )
-
-    if publish_datetime is None:
-        return False
-
-    today = datetime.now().date()
-    earliest_date = today - timedelta(
-        days=int(days) - 1
-    )
-
-    return (
-        earliest_date
-        <= publish_datetime.date()
-        <= today
-    )
-
-
-def extract_web_publish_time(
-    soup: BeautifulSoup,
-    html: str,
-) -> str:
-    """
-    从普通网页的 meta、time 标签、JSON-LD 和正文中提取发布时间。
-    """
-
-    meta_candidates = [
-        ("property", "article:published_time"),
-        ("property", "og:published_time"),
-        ("name", "publishdate"),
-        ("name", "publish_date"),
-        ("name", "pubdate"),
-        ("name", "date"),
-        ("name", "timestamp"),
-        ("itemprop", "datePublished"),
-    ]
-
-    for attribute, value in meta_candidates:
-        tag = soup.find(
-            "meta",
-            attrs={
-                attribute: value,
-            },
-        )
-
-        if not tag:
-            continue
-
-        content = str(
-            tag.get("content", "")
-        ).strip()
-
-        if parse_publish_datetime(content):
-            return content
-
-    time_tags = soup.find_all(
-        "time"
-    )
-
-    for time_tag in time_tags:
-        candidate = str(
-            time_tag.get("datetime", "")
-            or time_tag.get_text(
-                " ",
-                strip=True,
-            )
-        ).strip()
-
-        if parse_publish_datetime(candidate):
-            return candidate
-
-    json_patterns = [
-        r'"datePublished"\s*:\s*"([^"]+)"',
-        r'"dateCreated"\s*:\s*"([^"]+)"',
-        r'"pubDate"\s*:\s*"([^"]+)"',
-        r'"publishTime"\s*:\s*"([^"]+)"',
-        r'"publish_time"\s*:\s*"([^"]+)"',
-    ]
-
-    for pattern in json_patterns:
-        match = re.search(
-            pattern,
-            html,
-            flags=re.IGNORECASE,
-        )
-
-        if (
-            match
-            and parse_publish_datetime(
-                match.group(1)
-            )
-        ):
-            return match.group(1).strip()
-
-    # 最后从页面顶部文本中尝试识别明确日期。
-    page_text = soup.get_text(
-        " ",
-        strip=True,
-    )[:5000]
-
-    text_patterns = [
-        r"20\d{2}年\d{1,2}月\d{1,2}日(?:\s+\d{1,2}:\d{2}(?::\d{2})?)?",
-        r"20\d{2}[-/.]\d{1,2}[-/.]\d{1,2}(?:\s+\d{1,2}:\d{2}(?::\d{2})?)?",
-    ]
-
-    for pattern in text_patterns:
-        match = re.search(
-            pattern,
-            page_text,
-        )
-
-        if (
-            match
-            and parse_publish_datetime(
-                match.group(0)
-            )
-        ):
-            return match.group(0)
-
-    return "未获取到发布时间"
 
 
 # ============================================================
@@ -979,6 +740,7 @@ def scrape_webpage(url: str) -> str:
             return json.dumps(
                 {
                     "success": False,
+                    "source_kind": "web",
                     "error": "网页打开成功，但没有提取到正文。",
                     "url": final_url,
                 },
@@ -988,6 +750,7 @@ def scrape_webpage(url: str) -> str:
         return json.dumps(
             {
                 "success": True,
+                "source_kind": "web",
                 "title": title,
                 "account": account,
                 "publish_time": publish_time,
@@ -1001,6 +764,7 @@ def scrape_webpage(url: str) -> str:
         return json.dumps(
             {
                 "success": False,
+                "source_kind": "web",
                 "error": str(error),
                 "url": url,
             },
@@ -1008,358 +772,9 @@ def scrape_webpage(url: str) -> str:
         )
 
 
-@function_tool
-def save_webpage_analysis(
-    title: str,
-    account: str,
-    publish_time: str,
-    article_url: str,
-    category: str,
-    companies: str,
-    keywords: str,
-    summary: str,
-    importance: str,
-    reason: str,
-    relevance_score: int,
-    quality_score: int,
-    importance_score: int,
-    source_reliability_score: int,
-    originality_score: int,
-    source_type: str,
-    technology_route: str,
-    evidence_level: str,
-    is_promotional: str,
-    selection_reason: str,
-    requested_days: int = 7,
-) -> str:
-    """
-    将普通网页按照与微信公众号文章一致的完整结构保存。
-    """
-
-    fields = [
-        "publish_time",
-        "title",
-        "account",
-        "article_url",
-        "category",
-        "companies",
-        "keywords",
-        "summary",
-        "importance",
-        "reason",
-        "relevance_score",
-        "quality_score",
-        "importance_score",
-        "source_reliability_score",
-        "originality_score",
-        "source_type",
-        "technology_route",
-        "evidence_level",
-        "is_promotional",
-        "selection_reason",
-    ]
-
-    article_url = article_url.strip()
-    requested_days = max(
-        1,
-        min(int(requested_days), 3650),
-    )
-
-    if not is_within_requested_days(
-        publish_time,
-        requested_days,
-    ):
-        if (
-            parse_publish_datetime(
-                publish_time
-            )
-            is None
-        ):
-            return (
-                "保存状态：filtered。"
-                f"未获取到可验证的发布时间，无法确认属于最近 "
-                f"{requested_days} 天，本次不保存。"
-            )
-
-        return (
-            "保存状态：filtered。"
-            f"发布时间 {publish_time} 不在最近 "
-            f"{requested_days} 天内，本次不保存。"
-        )
-
-    if WEB_RESULTS_FILE.exists():
-        with WEB_RESULTS_FILE.open(
-            mode="r",
-            newline="",
-            encoding="utf-8-sig",
-        ) as file:
-            for row in csv.DictReader(file):
-                if (
-                    row.get("article_url", "").strip()
-                    == article_url
-                ):
-                    return (
-                        "保存状态：duplicate。"
-                        "此前已保存，本次已跳过。"
-                    )
-
-    def clamp_score(value: int) -> int:
-        return max(
-            0,
-            min(int(value), 100),
-        )
-
-    if importance not in {"高", "中", "低"}:
-        raise ValueError(
-            "importance 只能是：高、中、低。"
-        )
-
-    if evidence_level not in {"高", "中", "低"}:
-        raise ValueError(
-            "evidence_level 只能是：高、中、低。"
-        )
-
-    if is_promotional not in {"是", "否"}:
-        raise ValueError(
-            "is_promotional 只能是：是、否。"
-        )
-
-    row = {
-        "publish_time": str(publish_time).strip(),
-        "title": str(title).strip(),
-        "account": str(account).strip(),
-        "article_url": article_url,
-        "category": str(category).strip(),
-        "companies": str(companies).strip(),
-        "keywords": str(keywords).strip(),
-        "summary": str(summary).strip(),
-        "importance": importance,
-        "reason": str(reason).strip(),
-        "relevance_score": clamp_score(
-            relevance_score
-        ),
-        "quality_score": clamp_score(
-            quality_score
-        ),
-        "importance_score": clamp_score(
-            importance_score
-        ),
-        "source_reliability_score": clamp_score(
-            source_reliability_score
-        ),
-        "originality_score": clamp_score(
-            originality_score
-        ),
-        "source_type": str(source_type).strip(),
-        "technology_route": str(
-            technology_route
-        ).strip(),
-        "evidence_level": evidence_level,
-        "is_promotional": is_promotional,
-        "selection_reason": str(
-            selection_reason
-        ).strip(),
-    }
-
-    file_exists = WEB_RESULTS_FILE.exists()
-
-    with WEB_RESULTS_FILE.open(
-        mode="a",
-        newline="",
-        encoding="utf-8-sig",
-    ) as file:
-        writer = csv.DictWriter(
-            file,
-            fieldnames=fields,
-        )
-
-        if not file_exists:
-            writer.writeheader()
-
-        writer.writerow(row)
-
-    return (
-        "保存状态：saved。"
-        f"本次新增成功，文件位置：{WEB_RESULTS_FILE.resolve()}"
-    )
-
-
 # ============================================================
 # 6. 总控 Agent
 # ============================================================
-
-
-
-# ============================================================
-# 6. 覆盖率分析工具
-# ============================================================
-
-@function_tool
-def calculate_internal_coverage(
-    days: int = 0,
-) -> str:
-    """
-    计算内部覆盖率。
-
-    days=0 表示分析全部已有数据；
-    days>0 表示只分析最近指定自然日的数据。
-    """
-
-    try:
-        days = max(
-            0,
-            min(int(days), 3650),
-        )
-
-        result = (
-            coverage_module
-            .calculate_internal_coverage(
-                days=days,
-            )
-        )
-
-        report_file = (
-            coverage_module
-            .save_report(result)
-        )
-
-        return json.dumps(
-            {
-                "success": True,
-                "report_text": (
-                    coverage_module
-                    .format_internal_report(
-                        result
-                    )
-                ),
-                "report": result,
-                "report_file": str(
-                    report_file.resolve()
-                ),
-            },
-            ensure_ascii=False,
-        )
-
-    except Exception as error:
-        return json.dumps(
-            {
-                "success": False,
-                "error": str(error),
-            },
-            ensure_ascii=False,
-        )
-
-
-@function_tool
-def create_benchmark_events_template() -> str:
-    """
-    创建相对覆盖率所需的基准事件表模板。
-    """
-
-    try:
-        template_file = (
-            coverage_module
-            .create_benchmark_template()
-        )
-
-        return json.dumps(
-            {
-                "success": True,
-                "message": (
-                    "基准事件表已准备好。"
-                    "请在 data/benchmark_events.csv 中"
-                    "删除 example_ 开头的示例行，"
-                    "再填写真实基准事件。"
-                ),
-                "template_file": str(
-                    template_file.resolve()
-                ),
-            },
-            ensure_ascii=False,
-        )
-
-    except Exception as error:
-        return json.dumps(
-            {
-                "success": False,
-                "error": str(error),
-            },
-            ensure_ascii=False,
-        )
-
-
-@function_tool
-def calculate_relative_coverage(
-    days: int = 0,
-    match_threshold: float = 0.55,
-    important_only: bool = True,
-) -> str:
-    """
-    根据 data/benchmark_events.csv 计算相对事件覆盖率。
-
-    days=0 表示比较全部数据；
-    match_threshold 建议保持默认 0.55；
-    important_only=true 时只比较高、中重要事件。
-    """
-
-    try:
-        days = max(
-            0,
-            min(int(days), 3650),
-        )
-
-        match_threshold = max(
-            0.30,
-            min(
-                float(match_threshold),
-                0.95,
-            ),
-        )
-
-        result = (
-            coverage_module
-            .calculate_relative_coverage(
-                days=days,
-                match_threshold=(
-                    match_threshold
-                ),
-                important_only=(
-                    bool(important_only)
-                ),
-            )
-        )
-
-        report_file = (
-            coverage_module
-            .save_report(result)
-        )
-
-        return json.dumps(
-            {
-                "success": True,
-                "report_text": (
-                    coverage_module
-                    .format_relative_report(
-                        result
-                    )
-                ),
-                "report": result,
-                "report_file": str(
-                    report_file.resolve()
-                ),
-            },
-            ensure_ascii=False,
-        )
-
-    except Exception as error:
-        return json.dumps(
-            {
-                "success": False,
-                "error": str(error),
-            },
-            ensure_ascii=False,
-        )
-
 
 main_agent = Agent(
     name="资讯搜索抓取总控智能体",
@@ -1398,6 +813,7 @@ main_agent = Agent(
    微信公众号、普通网页、新闻网站、公司官网、政府网站和搜索结果。
 
 2. 最近一周按7个自然日处理；最近一个月默认按30个自然日处理。
+   days=0 表示不启用时间限制。
 
 3. 搜索结果页只能提供候选链接，不能证明发布时间。
    必须抓取每篇正文并读取 scrape 工具返回的 publish_time。
@@ -1423,16 +839,22 @@ main_agent = Agent(
 
 8. 用户没有提出时间限制的单个链接分析，可明确使用 requested_days=0；
    但搜索任务未指定时间时，默认最近7天。
+   用户明确要求“所有时间”“不限时间”或“不限制日期”时，
+   微信搜索必须调用 search_wechat_articles，并传入 days=0。
+   此时不得因发布时间缺失或文章较旧而在搜索阶段丢弃文章。
 
 【三、抓取工具规则】
 
 1. 微信公众号链接：
    - 必须使用微信专用分析流程；
    - analyze_wechat_articles 内部会逐篇调用 wechat_agent；
+   - 微信抓取结果的 source_kind 必须为 wechat；
    - wechat_agent 的工具调用和保存结果为最终依据。
 
 2. 普通网页链接：
    - 必须先调用 scrape_webpage；
+   - 抓取结果的 source_kind 必须为 web；
+   - 保存时必须原样使用抓取结果的 url；
    - 如果 success=false：
      * 说明失败原因；
      * 不得调用 save_webpage_analysis；
@@ -1618,6 +1040,8 @@ is_promotional、selection_reason。
 1. 微信搜索：
    - 调用 search_wechat_articles；
    - 未指定时间默认最近7天；
+   - 用户要求所有时间或不限日期时传入 days=0；
+   - days=0 时不按发布时间过滤，发布时间缺失也可保留为候选文章；
    - 未指定数量默认5篇；
    - 搜索工具会自动扩展相关搜索词。
 2. 普通网页搜索：
@@ -1636,22 +1060,7 @@ is_promotional、selection_reason。
    - status="found_new"：搜到并有新增。
 4. 不得把 new_count=0 错误描述成 found_count=0。
 
-【十四、覆盖率分析】
-
-当用户要求“内部覆盖率”时：
-- 调用 calculate_internal_coverage；
-- 未指定时间时 days=0，分析全部已有数据；
-- 必须明确说明内部覆盖率不等于全网覆盖率。
-
-当用户要求“相对覆盖率”时：
-- 先确认 data/benchmark_events.csv 是否已有真实基准事件；
-- 如果没有，调用 create_benchmark_events_template；
-- 告诉用户填写基准事件后，再调用 calculate_relative_coverage；
-- 不得在只有示例行时编造相对覆盖率；
-- 相对覆盖率按事件匹配，不按文章标题完全一致判断；
-- 自动匹配结果属于辅助判断，边界结果需要人工复核。
-
-【十五、最终展示】
+【十四、最终展示】
 
 每篇被分析的内容，最终必须忠实展示：
 
@@ -1693,9 +1102,6 @@ is_promotional、selection_reason。
         search_web_pages,
         scrape_webpage,
         save_webpage_analysis,
-        calculate_internal_coverage,
-        create_benchmark_events_template,
-        calculate_relative_coverage,
     ],
 )
 
@@ -1712,14 +1118,11 @@ async def main() -> None:
 
     print(
         "\n示例：\n"
-        "搜索最近7天量子计算融资相关的微信公众号文章，"
-        "最多5篇并分析保存\n"
+        "搜索最近7天量子计算融资相关的微信公众号文章，最多5篇并分析保存\n"
         "搜索 IBM 量子计算最新进展的普通网页，最多3篇并总结\n"
         "分析这个网页：https://example.com/article\n"
         "处理 data/links.csv 中的全部微信文章\n"
-        "计算全部数据的内部覆盖率\n"
-        "创建相对覆盖率基准事件模板\n"
-        "计算最近7天的相对覆盖率\n"
+        "搜索最近3天量子行业微信公众号文章，执行10个搜索词，每个搜索词最多保留2篇，合并去重后抓取正文，按统一规则分析并保存。\n"
     )
 
     while True:

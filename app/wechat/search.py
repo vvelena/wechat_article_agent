@@ -1,16 +1,26 @@
 import re
 import time
-from datetime import datetime, timedelta
-from pathlib import Path
-from urllib.parse import (
-    parse_qsl,
-    quote_plus,
-    urlencode,
-    urlparse,
-    urlunparse,
+from datetime import datetime
+from urllib.parse import quote_plus
+
+from app.core.paths import (
+    DATA_DIR,
+    LINKS_FILE,
+)
+from app.wechat.publish_time import (
+    is_within_last_days,
+    parse_wechat_publish_time,
+)
+from app.wechat.link_store import (
+    append_new_links,
+    load_existing_links,
+)
+from app.wechat.url_utils import (
+    choose_valid_wechat_url,
+    is_valid_wechat_url as is_wechat_article_url,
+    normalize_wechat_url,
 )
 
-import pandas as pd
 from bs4 import BeautifulSoup
 from playwright.sync_api import sync_playwright
 
@@ -19,10 +29,7 @@ from playwright.sync_api import sync_playwright
 # 1. 基础配置
 # ============================================================
 
-DATA_DIR = Path("data")
 DATA_DIR.mkdir(parents=True, exist_ok=True)
-
-LINKS_FILE = DATA_DIR / "links.csv"
 
 SEARCH_DAYS = 7
 QUERY_INTERVAL_SECONDS = 3
@@ -50,226 +57,8 @@ BASE_QUERIES = [
 
 
 # ============================================================
-# 3. 日期处理
-# ============================================================
-
-def parse_wechat_publish_time(
-    publish_time_text: str,
-) -> datetime | None:
-    """
-    将微信公众号发布时间转换为 datetime。
-    """
-
-    text = str(publish_time_text).strip()
-
-    if not text:
-        return None
-
-    formats = [
-        "%Y年%m月%d日 %H:%M",
-        "%Y年%m月%d日",
-        "%Y-%m-%d %H:%M",
-        "%Y-%m-%d",
-        "%Y/%m/%d %H:%M",
-        "%Y/%m/%d",
-    ]
-
-    for date_format in formats:
-        try:
-            return datetime.strptime(
-                text,
-                date_format,
-            )
-        except ValueError:
-            continue
-
-    return None
-
-
-def is_within_last_days(
-    publish_time_text: str,
-    days: int = SEARCH_DAYS,
-) -> bool:
-    """
-    按自然日期判断文章是否在最近指定天数内。
-    """
-
-    publish_datetime = parse_wechat_publish_time(
-        publish_time_text
-    )
-
-    if publish_datetime is None:
-        return False
-
-    today = datetime.now().date()
-    earliest_date = today - timedelta(
-        days=days - 1
-    )
-    publish_date = publish_datetime.date()
-
-    return earliest_date <= publish_date <= today
-
-
-# ============================================================
 # 4. 微信链接处理
 # ============================================================
-
-def normalize_wechat_url(url: str) -> str:
-    """
-    标准化微信公众号文章链接。
-
-    支持：
-    1. https://mp.weixin.qq.com/s/文章ID
-    2. https://mp.weixin.qq.com/s?__biz=...&mid=...&idx=...&sn=...
-    3. https://mp.weixin.qq.com/s?src=...&timestamp=...&ver=...&signature=...
-    """
-
-    cleaned = str(url).strip()
-    parsed = urlparse(cleaned)
-
-    if parsed.scheme not in {"http", "https"}:
-        return cleaned
-
-    hostname = (parsed.hostname or "").lower()
-
-    if hostname != "mp.weixin.qq.com":
-        return cleaned
-
-    if (
-        parsed.path.startswith("/s/")
-        and len(parsed.path) > 3
-    ):
-        normalized = parsed._replace(
-            scheme="https",
-            netloc="mp.weixin.qq.com",
-            query="",
-            fragment="",
-        )
-
-        return urlunparse(normalized).rstrip("/")
-
-    if parsed.path == "/s":
-        query_items = parse_qsl(
-            parsed.query,
-            keep_blank_values=False,
-        )
-
-        allowed_keys = {
-            "__biz",
-            "mid",
-            "idx",
-            "sn",
-            "chksm",
-            "src",
-            "timestamp",
-            "ver",
-            "signature",
-            "new",
-        }
-
-        filtered_query = [
-            (key, value)
-            for key, value in query_items
-            if key in allowed_keys
-        ]
-
-        normalized_query = urlencode(
-            filtered_query
-        )
-
-        normalized = parsed._replace(
-            scheme="https",
-            netloc="mp.weixin.qq.com",
-            query=normalized_query,
-            fragment="",
-        )
-
-        return urlunparse(normalized)
-
-    return cleaned
-
-
-def is_wechat_article_url(url: str) -> bool:
-    """
-    判断是否为可访问的微信公众号文章链接。
-    """
-
-    parsed = urlparse(
-        str(url).strip()
-    )
-
-    hostname = (
-        parsed.hostname or ""
-    ).lower()
-
-    if (
-        parsed.scheme not in {"http", "https"}
-        or hostname != "mp.weixin.qq.com"
-    ):
-        return False
-
-    if (
-        parsed.path.startswith("/s/")
-        and len(parsed.path) > 3
-    ):
-        return True
-
-    if parsed.path != "/s":
-        return False
-
-    query_params = dict(
-        parse_qsl(
-            parsed.query,
-            keep_blank_values=False,
-        )
-    )
-
-    standard_keys = {
-        "__biz",
-        "mid",
-        "idx",
-        "sn",
-    }
-
-    if standard_keys.issubset(
-        query_params.keys()
-    ):
-        return True
-
-    signed_keys = {
-        "src",
-        "timestamp",
-        "ver",
-        "signature",
-    }
-
-    if signed_keys.issubset(
-        query_params.keys()
-    ):
-        return True
-
-    return False
-
-
-
-def choose_valid_wechat_url(
-    candidate_urls: list[str],
-) -> str:
-    """
-    从多个候选地址中选择一个有效的微信公众号文章链接。
-    """
-    for candidate_url in candidate_urls:
-        normalized_url = normalize_wechat_url(
-            candidate_url
-        )
-
-        if is_wechat_article_url(
-            normalized_url
-        ):
-            return normalized_url
-
-    return ""
-
 
 def extract_real_wechat_url(
     article_page,
@@ -482,70 +271,6 @@ def extract_publish_time_from_page(
 # ============================================================
 # 6. links.csv 读写
 # ============================================================
-
-def load_existing_links() -> set[str]:
-    """
-    读取 data/links.csv 中已有链接。
-    """
-
-    if not LINKS_FILE.exists():
-        return set()
-
-    try:
-        df = pd.read_csv(
-            LINKS_FILE
-        )
-    except pd.errors.EmptyDataError:
-        return set()
-
-    if "article_url" not in df.columns:
-        raise ValueError(
-            "data/links.csv 中必须包含 article_url 列。"
-        )
-
-    existing_links: set[str] = set()
-
-    for raw_url in df["article_url"].dropna():
-        normalized = normalize_wechat_url(
-            str(raw_url)
-        )
-
-        if is_wechat_article_url(
-            normalized
-        ):
-            existing_links.add(
-                normalized
-            )
-
-    return existing_links
-
-
-def append_new_links(
-    new_links: list[str],
-) -> None:
-    """
-    将新链接追加写入 data/links.csv。
-    """
-
-    if not new_links:
-        return
-
-    file_exists = LINKS_FILE.exists()
-
-    df = pd.DataFrame(
-        {
-            "article_url": new_links,
-        }
-    )
-
-    df.to_csv(
-        LINKS_FILE,
-        mode="a",
-        header=not file_exists,
-        index=False,
-        encoding="utf-8-sig",
-    )
-
 
 # ============================================================
 # 7. 构建搜索词
@@ -849,16 +574,22 @@ def validate_result_article(
         f"{publish_time_text or '未获取到'}"
     )
 
-    if not publish_time_text:
+    if (
+        SEARCH_DAYS > 0
+        and not publish_time_text
+    ):
         print(
             "[忽略] 未获取到发布时间，"
-            "无法确认是否属于近 7 天。"
+            f"无法确认是否属于最近 {SEARCH_DAYS} 天。"
         )
         return ""
 
-    if not is_within_last_days(
-        publish_time_text,
-        days=SEARCH_DAYS,
+    if (
+        SEARCH_DAYS > 0
+        and not is_within_last_days(
+            publish_time_text,
+            days=SEARCH_DAYS,
+        )
     ):
         print(
             "[忽略旧文章] 发布时间不在"
@@ -1086,9 +817,15 @@ def search_sogou_with_playwright(
                         final_url
                     )
 
+                    if SEARCH_DAYS > 0:
+                        result_label = (
+                            f"发现近{SEARCH_DAYS}天文章"
+                        )
+                    else:
+                        result_label = "发现文章（不限日期）"
+
                     print(
-                        f"[发现近{SEARCH_DAYS}天文章] "
-                        f"{final_url}"
+                        f"[{result_label}] {final_url}"
                     )
 
                 result_links = page.locator(
@@ -1149,11 +886,52 @@ def read_positive_integer(
     return value
 
 
+def read_non_negative_integer(
+    prompt: str,
+    type_error_message: str,
+    range_error_message: str,
+) -> int | None:
+    """
+    读取一个大于等于 0 的整数。
+    """
+
+    value_text = input(
+        prompt
+    ).strip()
+
+    try:
+        value = int(
+            value_text
+        )
+    except ValueError:
+        print(
+            type_error_message
+        )
+        return None
+
+    if value < 0:
+        print(
+            range_error_message
+        )
+        return None
+
+    return value
+
+
 def read_search_options(
-) -> tuple[int, int] | None:
+) -> tuple[int, int, int] | None:
     """
-    读取搜索词数量和每个搜索词的结果数量。
+    读取时间范围、搜索词数量和每个搜索词的结果数量。
     """
+
+    search_days = read_non_negative_integer(
+        prompt="搜索最近多少天？输入 0 表示不限日期，建议输入 7：",
+        type_error_message="搜索天数必须是整数。",
+        range_error_message="搜索天数不能小于 0。",
+    )
+
+    if search_days is None:
+        return None
 
     max_queries = read_positive_integer(
         prompt="本次执行多少个搜索词？建议第一次输入 3：",
@@ -1175,7 +953,7 @@ def read_search_options(
     if max_results is None:
         return None
 
-    return max_queries, max_results
+    return search_days, max_queries, max_results
 
 
 def collect_new_links(
@@ -1274,42 +1052,3 @@ def print_search_summary(
     )
 
 
-def main() -> None:
-    print("=" * 60)
-    print("量子行业微信公众号自动搜索")
-    print(
-        f"时间范围：最近 {SEARCH_DAYS} 个自然日"
-    )
-    print("=" * 60)
-
-    search_options = read_search_options()
-
-    if search_options is None:
-        return
-
-    max_queries, max_results = search_options
-
-    queries = build_queries(
-        max_queries
-    )
-
-    existing_links = load_existing_links()
-
-    new_links = collect_new_links(
-        queries,
-        max_results,
-        existing_links,
-    )
-
-    append_new_links(
-        new_links
-    )
-
-    print_search_summary(
-        existing_links,
-        new_links,
-    )
-
-
-if __name__ == "__main__":
-    main()

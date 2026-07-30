@@ -1,8 +1,10 @@
-import asyncio
 import os
-from datetime import datetime, timedelta
-from pathlib import Path
+from datetime import timedelta
 
+from app.core.paths import (
+    REPORTS_DIR,
+    WECHAT_RESULTS_FILE,
+)
 import pandas as pd
 from agents import (
     Agent,
@@ -29,8 +31,7 @@ if not DEEPSEEK_API_KEY:
 
 set_tracing_disabled(True)
 
-DATA_FILE = Path("wechat_results.csv")
-REPORTS_DIR = Path("reports")
+DATA_FILE = WECHAT_RESULTS_FILE
 
 REPORTS_DIR.mkdir(exist_ok=True)
 
@@ -205,7 +206,7 @@ def load_article_data() -> pd.DataFrame:
     if not DATA_FILE.exists():
         raise FileNotFoundError(
             "没有找到 wechat_results.csv，"
-            "请先运行 wechat_agent.py 分析文章。"
+            "请先通过 main.py 分析微信文章。"
         )
 
     df = pd.read_csv(DATA_FILE)
@@ -407,44 +408,3 @@ async def generate_weekly_report(
     print(output_file.resolve())
 
 
-# ============================================================
-# 9. 主程序
-# ============================================================
-
-async def main() -> None:
-    print("=" * 60)
-    print("量子行业日报 / 周报生成 Agent")
-    print("=" * 60)
-
-    print("\n请选择报告类型：")
-    print("1. 日报")
-    print("2. 周报")
-
-    choice = input(
-        "\n请输入 1 或 2："
-    ).strip()
-
-    if choice == "1":
-        report_date = input(
-            "请输入日报日期，例如 2026-07-21："
-        ).strip()
-
-        await generate_daily_report(
-            report_date
-        )
-
-    elif choice == "2":
-        end_date = input(
-            "请输入周报结束日期，例如 2026-07-21："
-        ).strip()
-
-        await generate_weekly_report(
-            end_date
-        )
-
-    else:
-        print("输入错误，只能输入 1 或 2。")
-
-
-if __name__ == "__main__":
-    asyncio.run(main())

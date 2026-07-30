@@ -1,13 +1,11 @@
 import re
 import unicodedata
-from pathlib import Path
-
 import pandas as pd
 
+from app.core.paths import WECHAT_RESULTS_FILE
 
-DATA_FILE = Path(
-    "data/wechat_results.csv"
-)
+
+DATA_FILE = WECHAT_RESULTS_FILE
 
 
 def normalize_text(text: str) -> str:
