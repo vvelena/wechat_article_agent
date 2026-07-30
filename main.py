@@ -7,6 +7,7 @@ from app.core.paths import (
     DATA_DIR,
     WECHAT_RESULTS_FILE,
 )
+from app.core.csv_admin import clear_csv_data
 from app.web.publish_time import extract_web_publish_time
 from app.web.result_store import save_webpage_analysis
 from app.wechat.link_store import load_article_urls
@@ -772,6 +773,33 @@ def scrape_webpage(url: str) -> str:
         )
 
 
+@function_tool
+def clear_table_data(target: str) -> str:
+    """
+    清空指定 CSV 的数据行并保留表头。
+
+    target 只允许：
+    links（links.csv）、wechat（wechat_results.csv）、
+    web（web_results.csv）或 all（三个文件）。
+    """
+
+    try:
+        result = clear_csv_data(target)
+        return json.dumps(
+            result,
+            ensure_ascii=False,
+        )
+    except Exception as error:
+        return json.dumps(
+            {
+                "success": False,
+                "target": str(target),
+                "error": str(error),
+            },
+            ensure_ascii=False,
+        )
+
+
 # ============================================================
 # 6. 总控 Agent
 # ============================================================
@@ -1060,7 +1088,18 @@ is_promotional、selection_reason。
    - status="found_new"：搜到并有新增。
 4. 不得把 new_count=0 错误描述成 found_count=0。
 
-【十四、最终展示】
+【十四、表格数据清理】
+
+1. 用户明确指定 links.csv、wechat_results.csv 或 web_results.csv 时，
+   调用 clear_table_data，并分别传入 links、wechat 或 web。
+2. 用户明确要求清空“三个CSV”“全部表格数据”或“所有CSV”时，
+   调用 clear_table_data，并传入 all。
+3. 用户只说“清空表格数据”“删除CSV内容”等但没有指定范围时，
+   必须先询问要清空哪个表；不得自行推断为 all，不得调用工具。
+4. 清空只删除数据行并保留标准表头。不得通过该工具操作其他文件。
+5. 必须忠实展示工具返回的每个文件清空前、清空后的记录数。
+
+【十五、最终展示】
 
 每篇被分析的内容，最终必须忠实展示：
 
@@ -1102,6 +1141,7 @@ is_promotional、selection_reason。
         search_web_pages,
         scrape_webpage,
         save_webpage_analysis,
+        clear_table_data,
     ],
 )
 
@@ -1122,6 +1162,8 @@ async def main() -> None:
         "搜索 IBM 量子计算最新进展的普通网页，最多3篇并总结\n"
         "分析这个网页：https://example.com/article\n"
         "处理 data/links.csv 中的全部微信文章\n"
+        "清空微信结果表的数据\n"
+        "清空全部表格数据\n"
         "搜索最近3天量子行业微信公众号文章，执行10个搜索词，每个搜索词最多保留2篇，合并去重后抓取正文，按统一规则分析并保存。\n"
     )
 
